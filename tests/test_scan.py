@@ -1,4 +1,5 @@
 import datetime as dt
+import gzip
 import json
 import tempfile
 import unittest
@@ -6,14 +7,18 @@ from pathlib import Path
 
 from collector.scan import (
     classify_record,
+    _dnssec_mx_diagnostics,
     effective_spf_terminal,
     infer_provider_clues,
     is_au_domain,
     normalize_domain_result,
     parse_ranked_csv,
+    probe_dkim_selectors,
+    probe_dnssec,
     snapshot_summary,
     write_snapshot,
 )
+from collector.workflow import merge_scan, split_domains
 
 
 PROVIDERS = {
@@ -39,6 +44,14 @@ class DomainFilterTests(unittest.TestCase):
             {"rank": 2, "domain": "example.com"},
             {"rank": 3, "domain": "mx.service.example.au"},
         ])
+
+    def test_flat_shards_are_rank_ordered_and_at_most_200(self):
+        entries = [{"rank": rank, "domain": f"d{rank}.{'com.au' if rank % 2 else 'gov.au'}"} for rank in range(1, 402)]
+        chunks = split_domains(entries, 200)
+        self.assertEqual([len(chunk) for chunk in chunks], [200, 200, 1])
+        self.assertEqual(chunks[0][0]["rank"], 1)
+        self.assertEqual(chunks[1][0]["rank"], 201)
+        self.assertEqual(chunks[2][0]["rank"], 401)
 
 
 class SPFTests(unittest.TestCase):
@@ -147,7 +160,7 @@ class StatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(result["provider_clues"]["outbound"][0]["name"], "Google Workspace")
         self.assertEqual(result["provider_clues"]["inbound"][0]["name"], "Google Workspace")
         self.assertEqual(result["provider_clues"]["reporting"][0]["name"], "dmarcian")
-        self.assertEqual(result["dnssec"]["status"], "validated")
+        self.assertEqual(result["dnssec"]["status"], "secure")
 
     def test_dmarc_policies_are_preserved(self):
         for policy in ("none", "quarantine", "reject"):
@@ -183,6 +196,72 @@ class StatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(malformed["dmarc"]["status"], "present_invalid")
         self.assertEqual(timeout["dmarc"]["status"], "lookup_error")
 
+    def test_dnssec_evidence_distinguishes_unsigned_broken_and_lookup_error(self):
+        unsigned = probe_dnssec(
+            "unsigned.example.au",
+            False,
+            lambda name, kind: ["DNSKEY 257 3 13 abc"] if kind == "DNSKEY" else [],
+        )
+        broken = probe_dnssec(
+            "broken.example.au",
+            False,
+            lambda name, kind: ["DS 12345 13 2 digest"] if kind == "DS" else ["DNSKEY 257 3 13 abc"],
+        )
+        failed = probe_dnssec(
+            "timeout.example.au",
+            False,
+            lambda name, kind: (_ for _ in ()).throw(TimeoutError("DNS SERVFAIL")),
+        )
+        failed_key_lookup = probe_dnssec(
+            "key-timeout.example.au",
+            False,
+            lambda name, kind: ["DS 12345 13 2 digest"] if kind == "DS" else (_ for _ in ()).throw(TimeoutError("DNS SERVFAIL")),
+        )
+        self.assertEqual(unsigned["status"], "unsigned")
+        self.assertEqual(unsigned["dnskey"]["status"], "present")
+        self.assertEqual(broken["status"], "broken")
+        self.assertEqual(failed["status"], "lookup_error")
+        self.assertEqual(failed_key_lookup["status"], "lookup_error")
+
+    def test_checkdmarc_runtime_dnssec_messages_are_structured_for_mx_hosts(self):
+        states = _dnssec_mx_diagnostics([
+            "Could not check DNSSEC for mx1.example.au: the DS query for mx1.example.au failed with SERVFAIL",
+            "mx2.example.au publishes a DNSKEY record, but its parent zone publishes no DS record for it, so validators treat it as unsigned",
+        ])
+        result = normalize_domain_result(
+            "example.au",
+            1,
+            {
+                "checkdmarc": {
+                    "dnssec": True,
+                    "mx": {"hosts": [
+                        {"hostname": "mx1.example.au.", "dnssec": False},
+                        {"hostname": "mx2.example.au.", "dnssec": False},
+                    ]},
+                },
+                "runtime_diagnostics": [item["diagnostic"] for item in states],
+                "dnssec_evidence": {"status": "secure", "mx_hosts": states},
+            },
+            provider_catalog=PROVIDERS,
+        )
+        host_states = {host["hostname"]: host["dnssec_status"] for host in result["mx"]["hosts"]}
+        self.assertEqual(host_states, {"mx1.example.au": "lookup_error", "mx2.example.au": "unsigned"})
+
+    def test_common_dkim_probe_marks_found_and_incomplete_separately(self):
+        found = probe_dkim_selectors(
+            "example.au",
+            query=lambda name, kind: ["v=DKIM1; p=public-key"] if name.startswith("s1.") else [],
+            selectors=("s1", "s2"),
+        )
+        failed = probe_dkim_selectors(
+            "example.au",
+            query=lambda name, kind: (_ for _ in ()).throw(TimeoutError("DNS query timed out")),
+            selectors=("s1",),
+        )
+        self.assertEqual(found["selectors"][0]["status"], "found")
+        self.assertEqual(found["selectors"][1]["status"], "absent")
+        self.assertEqual(failed["selectors"][0]["status"], "lookup_error")
+
 
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_history_is_timestamped_and_summary_is_counted(self):
@@ -211,6 +290,8 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(len(index["snapshots"]), 2)
             self.assertIn("20261005", index["latest"])
             self.assertTrue((output / index["latest"]).exists())
+            raw_archive = output / index["snapshots"][0]["raw_archive"]
+            self.assertTrue(raw_archive.exists())
 
     def test_failed_domain_check_stays_in_snapshot_as_lookup_error(self):
         ranked = [{"rank": 1, "domain": "example.com.au"}]
@@ -228,6 +309,55 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["domains"][0]["spf"]["status"], "lookup_error")
         self.assertEqual(snapshot["domains"][0]["dmarc"]["status"], "lookup_error")
         self.assertEqual(snapshot["summary"]["spf"]["lookup_error"], 1)
+
+    def test_merge_requires_every_shard_and_keeps_latest_retry_attempt(self):
+        prepared = {
+            "generated_at": "2026-09-28T00:00:00Z",
+            "source": {"list_id": "ABCD1", "rank_limit": 2, "ranked_entry_count": 2},
+            "shard_size": 1,
+            "shard_count": 2,
+            "domains": [
+                {"rank": 1, "domain": "one.example.au"},
+                {"rank": 2, "domain": "two.example.au"},
+            ],
+        }
+        sample_rows = []
+        for entry in prepared["domains"]:
+            normalized = normalize_domain_result(
+                entry["domain"],
+                entry["rank"],
+                {"spf": {"record": None, "valid": False, "error": "SPF record does not exist"}},
+                provider_catalog=PROVIDERS,
+            )
+            sample_rows.append({
+                "rank": entry["rank"],
+                "domain": entry["domain"],
+                "normalized": normalized,
+                "raw": {"checkdmarc": {"spf": {"record": None}}},
+                "collection_error": None,
+            })
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_path = root / "input.json"
+            input_path.write_text(json.dumps(prepared), encoding="utf-8")
+            shard_dir = root / "shards"
+            shard_dir.mkdir()
+
+            def write_shard(index, attempt, row):
+                with gzip.open(shard_dir / f"shard-{index}-attempt-{attempt}.jsonl.gz", "wt", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"shard": index, "attempt": attempt, **row}) + "\n")
+
+            write_shard(0, 1, sample_rows[0])
+            write_shard(0, 2, sample_rows[0])
+            write_shard(1, 1, sample_rows[1])
+            output = root / "data"
+            snapshot = merge_scan(input_path, shard_dir, output)
+            self.assertEqual([row["rank"] for row in snapshot["domains"]], [1, 2])
+            self.assertTrue((output / snapshot["raw_archive"]).exists())
+
+            (shard_dir / "shard-1-attempt-1.jsonl.gz").unlink()
+            with self.assertRaisesRegex(RuntimeError, "missing shard outputs"):
+                merge_scan(input_path, shard_dir, root / "incomplete")
 
 
 if __name__ == "__main__":

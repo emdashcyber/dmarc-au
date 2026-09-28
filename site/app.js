@@ -11,6 +11,7 @@
     filtered: [],
     page: 1,
     hasData: false,
+    rawArchive: null,
   };
 
   const byId = (id) => document.getElementById(id);
@@ -68,11 +69,22 @@
     }
     result.spf_qualifiers = {};
     result.dmarc_policies = {};
+    result.dnssec = { secure: 0, unsigned: 0, broken: 0, lookup_error: 0, unknown: 0 };
+    result.mx_dnssec = { secure: 0, unsigned: 0, broken: 0, lookup_error: 0, unknown: 0 };
+    result.dkim = { found: 0, no_match: 0, incomplete: 0 };
     for (const domain of domains) {
       const outcome = domain.spf && domain.spf.terminal && domain.spf.terminal.outcome;
       if (outcome) result.spf_qualifiers[outcome] = (result.spf_qualifiers[outcome] || 0) + 1;
       const policy = domain.dmarc && domain.dmarc.policy && domain.dmarc.policy.p;
       if (policy) result.dmarc_policies[String(policy).toLowerCase()] = (result.dmarc_policies[String(policy).toLowerCase()] || 0) + 1;
+      const dnssecStatus = domain.dnssec && domain.dnssec.status;
+      if (Object.hasOwn(result.dnssec, dnssecStatus)) result.dnssec[dnssecStatus] += 1;
+      for (const host of safeArray(domain.mx && domain.mx.hosts)) {
+        const hostStatus = host && host.dnssec_status;
+        if (Object.hasOwn(result.mx_dnssec, hostStatus)) result.mx_dnssec[hostStatus] += 1;
+      }
+      const dkimStatus = domain.dkim && domain.dkim.status;
+      if (Object.hasOwn(result.dkim, dkimStatus)) result.dkim[dkimStatus] += 1;
     }
     return result;
   }
@@ -135,6 +147,38 @@
       target.append(row);
     }
     target.setAttribute("aria-label", `DMARC policy counts across ${count(total)} domains`);
+  }
+
+  function drawSignalsChart(snapshot) {
+    const target = byId("signals-chart");
+    target.replaceChildren();
+    const summary = summaryOf(snapshot);
+    const dnssec = summary.dnssec || {};
+    const mxDnssec = summary.mx_dnssec || {};
+    const dkim = summary.dkim || {};
+    const rows = [
+      { label: "DKIM selector match", value: Number(dkim.found || 0), tone: "reject" },
+      { label: "DKIM no common match", value: Number(dkim.no_match || 0), tone: "missing" },
+      { label: "DKIM lookup incomplete", value: Number(dkim.incomplete || 0), tone: "quarantine" },
+      { label: "DNSSEC secure", value: Number(dnssec.secure || 0), tone: "reject" },
+      { label: "DNSSEC unsigned", value: Number(dnssec.unsigned || 0), tone: "none" },
+      { label: "DNSSEC broken / error", value: Number(dnssec.broken || 0) + Number(dnssec.lookup_error || 0), tone: "missing" },
+      { label: "MX targets unsigned", value: Number(mxDnssec.unsigned || 0), tone: "none" },
+      { label: "MX DNSSEC broken / error", value: Number(mxDnssec.broken || 0) + Number(mxDnssec.lookup_error || 0), tone: "quarantine" },
+    ];
+    const scale = Math.max(1, ...rows.map((item) => item.value));
+    for (const item of rows) {
+      const row = el("div", "bar-row");
+      row.append(el("span", "bar-label", item.label));
+      const track = el("div", "bar-track");
+      const fill = el("div", "bar-fill");
+      fill.dataset.tone = item.tone;
+      fill.style.width = `${Math.max(item.value ? 2 : 0, (item.value / scale) * 100)}%`;
+      track.append(fill);
+      row.append(track, el("span", "bar-value", count(item.value)));
+      target.append(row);
+    }
+    target.setAttribute("aria-label", "DNSSEC chain states and common DKIM selector probe counts");
   }
 
   function drawHistoryChart() {
@@ -201,7 +245,9 @@
   function populateProviderFilter() {
     const select = byId("provider-filter");
     select.replaceChildren();
-    select.append(el("option", "", "Any service"));
+    const anyOption = el("option", "", "Any service");
+    anyOption.value = "all";
+    select.append(anyOption);
     const names = new Set();
     for (const domain of state.domains) {
       for (const item of providerNames(domain)) if (item.name !== "Unclassified") names.add(item.name);
@@ -219,6 +265,10 @@
     for (const item of providerNames(domain)) fields.push(item.name, ...item.hosts);
     fields.push(...safeArray(domain.spf && domain.spf.service_targets));
     for (const host of safeArray(domain.mx && domain.mx.hosts)) fields.push(host && host.hostname);
+    for (const selector of safeArray(domain.dkim && domain.dkim.selectors)) {
+      if (selector) fields.push(selector.selector, ...safeArray(selector.records));
+    }
+    fields.push(...safeArray(domain.runtime_diagnostics));
     return fields.filter(Boolean).join(" ").toLowerCase();
   }
 
@@ -228,6 +278,8 @@
     const qualifier = byId("spf-qualifier-filter").value;
     const dmarcPolicy = byId("dmarc-filter").value;
     const provider = byId("provider-filter").value;
+    const dnssecState = byId("dnssec-filter").value;
+    const dkimState = byId("dkim-filter").value;
     if (query && !state.searchIndex[index].includes(query)) return false;
     if (spfStatus !== "all" && (!domain.spf || domain.spf.status !== spfStatus)) return false;
     if (qualifier !== "all") {
@@ -245,10 +297,12 @@
         if (p !== dmarcPolicy) return false;
       }
     }
-    if (provider) {
+    if (provider !== "all") {
       const hasProvider = providerNames(domain).some((item) => item.name === provider);
       if (!hasProvider) return false;
     }
+    if (dnssecState !== "all" && (!domain.dnssec || domain.dnssec.status !== dnssecState)) return false;
+    if (dkimState !== "all" && (!domain.dkim || domain.dkim.status !== dkimState)) return false;
     return true;
   }
 
@@ -296,8 +350,28 @@
 
   function makeExtras(domain) {
     const wrapper = el("div", "extra-list");
-    const dnssec = domain.dnssec && domain.dnssec.validated;
-    wrapper.append(el("span", `extra-chip ${dnssec ? "good" : ""}`, dnssec ? "DNSSEC" : "DNSSEC ?"));
+    const dnssecStatus = domain.dnssec && domain.dnssec.status || "unknown";
+    const dnssecLabels = {
+      secure: ["DNSSEC secure", "good"],
+      unsigned: ["DNSSEC unsigned", "warn"],
+      broken: ["DNSSEC broken", "bad"],
+      lookup_error: ["DNSSEC lookup error", "warn"],
+      unknown: ["DNSSEC unknown", ""],
+    };
+    const [dnssecLabel, dnssecTone] = dnssecLabels[dnssecStatus] || dnssecLabels.unknown;
+    wrapper.append(el("span", `extra-chip ${dnssecTone}`, dnssecLabel));
+    const mxIssues = safeArray(domain.mx && domain.mx.hosts).filter((host) => host && ["broken", "lookup_error"].includes(host.dnssec_status)).length;
+    if (mxIssues) wrapper.append(el("span", "extra-chip bad", `MX DNSSEC issue ×${mxIssues}`));
+    const mxUnsigned = safeArray(domain.mx && domain.mx.hosts).filter((host) => host && host.dnssec_status === "unsigned").length;
+    if (mxUnsigned) wrapper.append(el("span", "extra-chip warn", `MX targets unsigned ×${mxUnsigned}`));
+    const dkim = domain.dkim || {};
+    if (dkim.status === "found") {
+      wrapper.append(el("span", "extra-chip good", `DKIM ${safeArray(dkim.found_selectors).length} selector matches`));
+    } else if (dkim.status === "incomplete") {
+      wrapper.append(el("span", "extra-chip", "DKIM probe incomplete"));
+    } else {
+      wrapper.append(el("span", "extra-chip", "No common DKIM match"));
+    }
     for (const [key, label] of [["mta_sts", "MTA-STS"], ["tls_reporting", "TLS-RPT"]]) {
       const value = domain[key] || {};
       if (value.status === "present_valid") wrapper.append(el("span", "extra-chip good", label));
@@ -351,6 +425,10 @@
       mta_sts: domain.mta_sts,
       tls_reporting: domain.tls_reporting,
       dnssec: domain.dnssec,
+      dkim: domain.dkim,
+      runtime_diagnostics: domain.runtime_diagnostics,
+      nameservers: domain.nameservers,
+      soa: domain.soa,
       provider_clues: domain.provider_clues,
     }, true);
     if (domain.errors && Object.keys(domain.errors).length) appendDetailBlock(content, "Lookup and collection errors", domain.errors, true);
@@ -428,6 +506,7 @@
     byId("next-page").disabled = state.page >= pageCount || total === 0;
     byId("download-csv").disabled = !state.hasData;
     byId("download-json").disabled = !state.hasData;
+    byId("download-raw").hidden = !state.hasData || !state.rawArchive;
   }
 
   function setSnapshotMeta(snapshot) {
@@ -447,6 +526,8 @@
     const snapshot = await response.json();
     if (!Array.isArray(snapshot.domains)) throw new Error("Snapshot is missing its domain list");
     state.snapshot = snapshot;
+    state.rawArchive = snapshot.raw_archive || entry.raw_archive || null;
+    if (state.rawArchive) byId("download-raw").href = new URL(state.rawArchive, DATA_INDEX_URL).href;
     state.domains = snapshot.domains;
     state.searchIndex = state.domains.map(searchableText);
     state.hasData = true;
@@ -454,6 +535,7 @@
     setSnapshotMeta(snapshot);
     setMetricCards(snapshot);
     drawPolicyChart(snapshot);
+    drawSignalsChart(snapshot);
     populateProviderFilter();
     getFilteredDomains();
     byId("empty-state").hidden = state.domains.length !== 0;
@@ -471,6 +553,7 @@
         state.hasData = false;
         byId("metrics").replaceChildren();
         byId("policy-chart").textContent = "No scans yet";
+        byId("signals-chart").textContent = "No scans yet";
         state.filtered = [];
         setSnapshotMeta(null);
         byId("empty-state").hidden = false;
@@ -518,6 +601,7 @@
       "dmarc_status", "dmarc_policy", "dmarc_source", "outbound_services",
       "inbound_services", "reporting_services", "mx_hosts", "mta_sts_status",
       "tls_reporting_status", "dnssec_validated",
+      "dnssec_status", "mx_dnssec_issues", "mx_dnssec_unsigned", "dkim_status", "dkim_found_selectors", "nameservers", "soa",
     ]];
     for (const domain of state.filtered) {
       const providers = domain.provider_clues || {};
@@ -540,6 +624,13 @@
         domain.mta_sts && domain.mta_sts.status,
         domain.tls_reporting && domain.tls_reporting.status,
         domain.dnssec && domain.dnssec.validated,
+        domain.dnssec && domain.dnssec.status,
+        safeArray(domain.mx && domain.mx.hosts).filter((host) => host && ["broken", "lookup_error"].includes(host.dnssec_status)).length,
+        safeArray(domain.mx && domain.mx.hosts).filter((host) => host && host.dnssec_status === "unsigned").length,
+        domain.dkim && domain.dkim.status,
+        safeArray(domain.dkim && domain.dkim.found_selectors).join("; "),
+        safeArray(domain.nameservers && domain.nameservers.nameservers || domain.nameservers).join("; "),
+        JSON.stringify(domain.soa || ""),
       ]);
     }
     const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
@@ -564,7 +655,7 @@
     }
   });
 
-  for (const id of ["search-input", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter"]) {
+  for (const id of ["search-input", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "dkim-filter"]) {
     byId(id).addEventListener(id === "search-input" ? "input" : "change", () => {
       state.page = 1;
       getFilteredDomains();

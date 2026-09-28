@@ -36,7 +36,8 @@
           <h1 id="page-title">How is Australian email set up?</h1>
           <p class="hero-intro">
             A weekly view of public mail-authentication DNS records, mail routing,
-            and transport-security signals across ranked .au domains.
+            DKIM selector observations, DNSSEC chain states, and transport-security
+            signals across ranked .au domains.
           </p>
           <div class="hero-footnote">
             <span class="source-chip">DNS snapshot</span>
@@ -97,6 +98,17 @@
             <div id="history-chart" class="history-chart" role="img" aria-label="DMARC enforcement trend"></div>
             <p id="history-caption" class="chart-caption">Historical trend appears after more snapshots are collected.</p>
           </article>
+          <article class="chart-card signals-card">
+            <div class="chart-heading">
+              <div>
+                <p class="chart-kicker">DNSSEC + DKIM</p>
+                <h3>Chain states and selector probes</h3>
+              </div>
+              <span class="chart-unit">domains / MX hosts</span>
+            </div>
+            <div id="signals-chart" class="bar-chart" role="img" aria-label="DNSSEC states and DKIM selector probe results"></div>
+            <p class="chart-caption">DKIM checks cover common selectors only; no match is not proof that DKIM is absent.</p>
+          </article>
         </div>
       </section>
 
@@ -105,11 +117,12 @@
           <div>
             <p class="eyebrow">DOMAIN EXPLORER</p>
             <h2 id="explorer-title">Inspect DNS signals</h2>
-            <p class="section-description">Service names are inferred from DNS hostnames. Open a row to inspect published records and parser notes.</p>
+            <p class="section-description">Service names are inferred from DNS hostnames. Open a row to inspect records, common DKIM selector results, DNSSEC evidence, and parser notes.</p>
           </div>
           <div class="download-actions">
             <button id="download-json" class="button button-secondary" type="button" disabled>Download JSON</button>
             <button id="download-csv" class="button button-primary" type="button" disabled>Download filtered CSV</button>
+            <a id="download-raw" class="button button-secondary" href="#" download hidden>Raw JSONL.GZ</a>
           </div>
         </div>
 
@@ -157,6 +170,26 @@
               <option value="all">Any service</option>
             </select>
           </div>
+          <div class="filter-select">
+            <label for="dnssec-filter">DNSSEC chain</label>
+            <select id="dnssec-filter">
+              <option value="all">Any state</option>
+              <option value="secure">Secure</option>
+              <option value="unsigned">Unsigned</option>
+              <option value="broken">Broken</option>
+              <option value="lookup_error">Lookup error</option>
+              <option value="unknown">Unknown</option>
+            </select>
+          </div>
+          <div class="filter-select">
+            <label for="dkim-filter">Common DKIM selectors</label>
+            <select id="dkim-filter">
+              <option value="all">Any result</option>
+              <option value="found">Match found</option>
+              <option value="no_match">No common match</option>
+              <option value="incomplete">Lookup incomplete</option>
+            </select>
+          </div>
         </div>
 
         <div class="table-toolbar">
@@ -200,7 +233,7 @@
           <p class="eyebrow">HOW TO READ THIS DATA</p>
           <h2 id="method-title">Published policy is a signal, not a message test.</h2>
           <p>
-            SPF qualifiers describe the record’s default sender treatment; a valid record without an explicit ending evaluates to neutral. DMARC shows the requested policy and where reports are sent. DNS alone cannot show whether a particular email passed, and provider labels are inferred from published hostnames.
+            SPF qualifiers describe the record’s default sender treatment; a valid record without an explicit ending evaluates to neutral. DMARC shows the requested policy and report destinations. DNSSEC states distinguish secure, unsigned, broken, and lookup-error results. DKIM probes check common selectors only, so no match is inconclusive. DNS alone cannot show whether a particular email passed, and provider labels are inferred from published hostnames.
           </p>
         </div>
         <div class="method-links">
