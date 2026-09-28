@@ -1,0 +1,113 @@
+{
+  "catalog_version": 1,
+  "providers": [
+    {
+      "name": "Google Workspace",
+      "outbound": ["_spf.google.com", "_spf.googlemail.com"],
+      "inbound": ["aspmx.l.google.com", "googlemail.com"],
+      "reporting": []
+    },
+    {
+      "name": "Microsoft 365",
+      "outbound": ["spf.protection.outlook.com", "protection.outlook.com"],
+      "inbound": ["mail.protection.outlook.com"],
+      "reporting": []
+    },
+    {
+      "name": "Amazon SES",
+      "outbound": ["amazonses.com"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "SendGrid",
+      "outbound": ["sendgrid.net"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Mailgun",
+      "outbound": ["mailgun.org"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Mailchimp",
+      "outbound": ["servers.mcsv.net", "mandrillapp.com"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Zoho Mail",
+      "outbound": ["zoho.com", "zohomail.com"],
+      "inbound": ["zoho.com", "zohomail.com"],
+      "reporting": []
+    },
+    {
+      "name": "Fastmail",
+      "outbound": ["messagingengine.com"],
+      "inbound": ["messagingengine.com"],
+      "reporting": []
+    },
+    {
+      "name": "Proton Mail",
+      "outbound": ["_spf.protonmail.ch"],
+      "inbound": ["protonmail.ch", "protonmail.com"],
+      "reporting": []
+    },
+    {
+      "name": "Salesforce",
+      "outbound": ["_spf.salesforce.com", "salesforce.com"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Mimecast",
+      "outbound": ["mimecast.com"],
+      "inbound": ["mimecast.com"],
+      "reporting": []
+    },
+    {
+      "name": "Proofpoint",
+      "outbound": ["proofpoint.com"],
+      "inbound": ["pphosted.com", "proofpoint.com"],
+      "reporting": []
+    },
+    {
+      "name": "Barracuda",
+      "outbound": ["barracuda.com", "barracudanetworks.com"],
+      "inbound": ["barracuda.com", "barracudanetworks.com"],
+      "reporting": []
+    },
+    {
+      "name": "dmarcian",
+      "outbound": [],
+      "inbound": [],
+      "reporting": ["dmarcian.com"]
+    },
+    {
+      "name": "Agari",
+      "outbound": [],
+      "inbound": [],
+      "reporting": ["agari.com"]
+    },
+    {
+      "name": "PowerDMARC",
+      "outbound": [],
+      "inbound": [],
+      "reporting": ["powerdmarc.com"]
+    },
+    {
+      "name": "URIports",
+      "outbound": [],
+      "inbound": [],
+      "reporting": ["uriports.com", "report-uri.com"]
+    },
+    {
+      "name": "OnDMARC",
+      "outbound": [],
+      "inbound": [],
+      "reporting": ["ondmarc.com"]
+    }
+  ]
+}

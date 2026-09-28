@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Explore SPF, DMARC, and related mail-security DNS records for .au domains in the Tranco top one million."
+    />
+    <meta name="theme-color" content="#101619" />
+    <title>.au Mail Authentication Observatory</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to data</a>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label=".au Mail Authentication Observatory home">
+        <span class="brand-mark" aria-hidden="true">AU</span>
+        <span class="brand-copy">
+          <strong>MAIL AUTH OBSERVATORY</strong>
+          <small>AUSTRALIA · PUBLIC DNS DATA</small>
+        </span>
+      </a>
+      <div class="header-meta">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span id="feed-status" role="status">Loading snapshot…</span>
+      </div>
+    </header>
+
+    <main id="main" class="page-shell">
+      <section class="hero" aria-labelledby="page-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="eyebrow-rule"></span>TRanco top 1,000,000 · ranked .au names</p>
+          <h1 id="page-title">How is Australian email set up?</h1>
+          <p class="hero-intro">
+            A weekly view of public mail-authentication DNS records, mail routing,
+            and transport-security signals across ranked .au domains.
+          </p>
+          <div class="hero-footnote">
+            <span class="source-chip">DNS snapshot</span>
+            <span id="snapshot-meta">Waiting for the first scan</span>
+          </div>
+        </div>
+        <aside class="hero-aside" aria-label="Data source information">
+          <div class="aside-number">.au</div>
+          <div>
+            <p class="aside-label">OBSERVATORY SCOPE</p>
+            <p class="aside-copy">Every ranked entry ending at the .au label boundary, including listed subdomains.</p>
+          </div>
+          <div class="aside-source">
+            <span>RANK SOURCE</span>
+            <a href="https://tranco-list.eu/" target="_blank" rel="noreferrer">TRANCO ↗</a>
+          </div>
+        </aside>
+      </section>
+
+      <section class="overview" aria-label="Snapshot summary">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">AT A GLANCE</p>
+            <h2>Posture overview</h2>
+          </div>
+          <div class="snapshot-tools">
+            <label for="snapshot-select">Snapshot</label>
+            <select id="snapshot-select" disabled>
+              <option>Loading…</option>
+            </select>
+          </div>
+        </div>
+        <div id="metrics" class="metric-grid" aria-live="polite">
+          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
+          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
+          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
+          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
+        </div>
+        <div class="chart-grid">
+          <article class="chart-card">
+            <div class="chart-heading">
+              <div>
+                <p class="chart-kicker">DMARC</p>
+                <h3>Published policy</h3>
+              </div>
+              <span class="chart-unit">domains</span>
+            </div>
+            <div id="policy-chart" class="bar-chart" role="img" aria-label="DMARC policy breakdown"></div>
+          </article>
+          <article class="chart-card history-card">
+            <div class="chart-heading">
+              <div>
+                <p class="chart-kicker">OVER TIME</p>
+                <h3>DMARC enforcement</h3>
+              </div>
+              <span class="chart-unit">reject + quarantine</span>
+            </div>
+            <div id="history-chart" class="history-chart" role="img" aria-label="DMARC enforcement trend"></div>
+            <p id="history-caption" class="chart-caption">Historical trend appears after more snapshots are collected.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="explorer" aria-labelledby="explorer-title">
+        <div class="section-heading explorer-heading">
+          <div>
+            <p class="eyebrow">DOMAIN EXPLORER</p>
+            <h2 id="explorer-title">Inspect DNS signals</h2>
+            <p class="section-description">Service names are inferred from DNS hostnames. Open a row to inspect published records and parser notes.</p>
+          </div>
+          <div class="download-actions">
+            <button id="download-json" class="button button-secondary" type="button" disabled>Download JSON</button>
+            <button id="download-csv" class="button button-primary" type="button" disabled>Download filtered CSV</button>
+          </div>
+        </div>
+
+        <div class="filter-panel">
+          <div class="filter-search">
+            <label for="search-input">Search domains or providers</label>
+            <input id="search-input" type="search" placeholder="Try example.com.au, Google Workspace…" autocomplete="off" />
+          </div>
+          <div class="filter-select">
+            <label for="spf-filter">SPF record</label>
+            <select id="spf-filter">
+              <option value="all">Any status</option>
+              <option value="present_valid">Valid</option>
+              <option value="present_invalid">Invalid</option>
+              <option value="absent">No record</option>
+              <option value="lookup_error">Lookup error</option>
+            </select>
+          </div>
+          <div class="filter-select">
+            <label for="spf-qualifier-filter">SPF ending</label>
+            <select id="spf-qualifier-filter">
+              <option value="all">Any ending</option>
+              <option value="fail">Hard fail · -all</option>
+              <option value="softfail">Softfail · ~all</option>
+              <option value="neutral">Neutral · ?all / implicit</option>
+              <option value="pass">Pass · +all</option>
+              <option value="implicit">No explicit all</option>
+            </select>
+          </div>
+          <div class="filter-select">
+            <label for="dmarc-filter">DMARC policy</label>
+            <select id="dmarc-filter">
+              <option value="all">Any policy</option>
+              <option value="reject">Reject</option>
+              <option value="quarantine">Quarantine</option>
+              <option value="none">None · monitor</option>
+              <option value="absent">No record</option>
+              <option value="present_invalid">Invalid</option>
+              <option value="lookup_error">Lookup error</option>
+            </select>
+          </div>
+          <div class="filter-select">
+            <label for="provider-filter">Likely service</label>
+            <select id="provider-filter" disabled>
+              <option value="all">Any service</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="table-toolbar">
+          <p id="result-count" aria-live="polite">Loading domains…</p>
+          <div class="pagination" aria-label="Table pages">
+            <button id="previous-page" class="page-button" type="button" aria-label="Previous page" disabled>←</button>
+            <span id="page-label">Page 1</span>
+            <button id="next-page" class="page-button" type="button" aria-label="Next page" disabled>→</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" class="rank-col">RANK</th>
+                <th scope="col">DOMAIN</th>
+                <th scope="col">SPF</th>
+                <th scope="col">DMARC</th>
+                <th scope="col">LIKELY SERVICES</th>
+                <th scope="col">MAIL ROUTING</th>
+                <th scope="col">EXTRAS</th>
+              </tr>
+            </thead>
+            <tbody id="domain-rows">
+              <tr><td colspan="7" class="empty-cell">Loading the public DNS snapshot…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="empty-state" class="empty-state" hidden>
+          <div class="empty-icon" aria-hidden="true">∅</div>
+          <h3>No scan data yet</h3>
+          <p>Run the <code>Refresh .au email data and publish Pages</code> workflow from the Actions tab to create the first snapshot.</p>
+        </div>
+        <div id="error-state" class="error-state" role="alert" hidden></div>
+      </section>
+
+      <section class="methodology" aria-labelledby="method-title">
+        <div class="method-mark" aria-hidden="true">i</div>
+        <div>
+          <p class="eyebrow">HOW TO READ THIS DATA</p>
+          <h2 id="method-title">Published policy is a signal, not a message test.</h2>
+          <p>
+            SPF qualifiers describe the record’s default sender treatment; a valid record without an explicit ending evaluates to neutral. DMARC shows the requested policy and where reports are sent. DNS alone cannot show whether a particular email passed, and provider labels are inferred from published hostnames.
+          </p>
+        </div>
+        <div class="method-links">
+          <a href="https://www.rfc-editor.org/rfc/rfc7208" target="_blank" rel="noreferrer">SPF · RFC 7208 ↗</a>
+          <a href="https://www.rfc-editor.org/rfc/rfc9989" target="_blank" rel="noreferrer">DMARC · RFC 9989 ↗</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>OPEN DATA · DNS AT SCAN TIME</span>
+      <span>Built from Tranco rankings and public DNS records</span>
+    </footer>
+  </body>
+</html>
