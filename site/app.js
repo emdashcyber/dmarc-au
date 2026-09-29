@@ -44,6 +44,25 @@
       present_invalid: ["Invalid", "bad"],
       absent: ["Absent", "dim"],
       lookup_error: ["Lookup error", "warn"],
+      valid: ["Valid", "good"],
+      valid_legacy: ["Valid · legacy path", "warn"],
+      expired: ["Expired", "bad"],
+      invalid: ["Invalid", "bad"],
+      insecure_transport: ["HTTP only", "warn"],
+      outside_top_1m: [">1M", "warn"],
+      in_top_1m: ["Top 1M", "good"],
+      present: ["Present", "good"],
+      response: ["Responded", "good"],
+      certificate_expired: ["Expired certificate", "bad"],
+      certificate_not_yet_valid: ["Not yet valid", "bad"],
+      certificate_name_mismatch: ["Name mismatch", "bad"],
+      certificate_untrusted: ["Untrusted certificate", "bad"],
+      tls_error: ["TLS error", "warn"],
+      request_error: ["Request error", "warn"],
+      redirect_limit: ["Redirect limit", "warn"],
+      blocked_destination: ["Blocked target", "warn"],
+      unavailable: ["Unavailable", "dim"],
+      not_collected: ["Not collected", "dim"],
       validated: ["Validated", "good"],
       not_validated: ["Not validated", "warn"],
       unknown: ["Unknown", "dim"],
@@ -102,14 +121,28 @@
     metrics.replaceChildren();
     const summary = summaryOf(snapshot);
     const total = Number(summary.domain_count || safeArray(snapshot.domains).length);
-    const dmarcFound = statusCount(summary, "dmarc", "present_valid") + statusCount(summary, "dmarc", "present_invalid");
+    const currentRanked = summary.rank_status && Number.isFinite(Number(summary.rank_status.in_top_1m))
+      ? Number(summary.rank_status.in_top_1m)
+      : snapshot.source && snapshot.source.au_entry_count !== undefined
+        ? Number(snapshot.source.au_entry_count)
+        : total;
     const enforcement = policyCount(summary, "reject") + policyCount(summary, "quarantine");
     const hardFail = Number(summary.spf_qualifiers && summary.spf_qualifiers.fail || 0);
+    const webTls = summary.web_tls || {};
+    const securityTxt = summary.security_txt || {};
+    const webDns = summary.web_dns || {};
+    const effectiveCaa = webDns.caa_effective || {};
+    const upgrades = summary.https_upgrade || {};
+    const headers = summary.security_headers || {};
     const items = [
-      { label: "Ranked .au domains", value: count(total), foot: "from the Tranco top‑1M list", className: "accent" },
-      { label: "DMARC records", value: count(dmarcFound), percent: ratio(dmarcFound, total), foot: `${ratio(dmarcFound, total)} of scanned names publish a record` },
+      { label: "Tracked .au names", value: count(total), foot: "current rankings plus retained roster", className: "accent" },
+      { label: "In current top 1M", value: count(currentRanked), percent: ratio(currentRanked, total), foot: "ranked names in this Tranco list" },
       { label: "Enforcement policy", value: count(enforcement), percent: ratio(enforcement, total), foot: "p=reject or p=quarantine", className: "good" },
       { label: "SPF hard fail", value: count(hardFail), percent: ratio(hardFail, total), foot: "effective -all ending" },
+      { label: "Valid HTTPS", value: count(webTls.valid), percent: ratio(webTls.valid, total), foot: "certificate verified at scan time", className: "good" },
+      { label: "Valid security.txt", value: count(Number(securityTxt.valid || 0) + Number(securityTxt.valid_legacy || 0)), foot: "required fields, expiry, UTF-8, HTTPS" },
+      { label: "Effective CAA", value: count(effectiveCaa.present), foot: "direct or inherited from an ancestor" },
+      { label: "Active HSTS", value: count(upgrades.hsts_active), foot: `${count(headers["content-security-policy"])} also publish CSP` },
     ];
     for (const item of items) {
       const card = el("article", `metric-card ${item.className || ""}`);
@@ -189,7 +222,7 @@
       .slice()
       .sort((a, b) => new Date(a.generated_at) - new Date(b.generated_at));
     if (history.length < 2) {
-      caption.textContent = "Historical trend appears after more snapshots are collected.";
+      caption.textContent = "Historical trend appears after more scan snapshots are collected.";
       return;
     }
     const visible = history.slice(-52);
@@ -209,7 +242,44 @@
       point.append(bar);
       target.append(point);
     }
-    caption.textContent = `Showing the latest ${count(visible.length)} of ${count(history.length)} weekly snapshots.`;
+    caption.textContent = `Showing the latest ${count(visible.length)} of ${count(history.length)} scan snapshots.`;
+  }
+
+  function drawWebHistoryChart() {
+    const target = byId("web-history-chart");
+    target.replaceChildren();
+    const caption = byId("web-history-caption");
+    const history = safeArray(state.index && state.index.snapshots)
+      .slice()
+      .sort((a, b) => new Date(a.generated_at) - new Date(b.generated_at));
+    if (!history.length) {
+      caption.textContent = "Web trends appear after snapshots are collected.";
+      return;
+    }
+    const visible = history.slice(-52);
+    for (let index = 0; index < visible.length; index += 1) {
+      const item = visible[index];
+      const summary = item.summary || {};
+      const total = Number(item.domain_count || summary.domain_count || 0);
+      const tls = Number(summary.web_tls && summary.web_tls.valid || 0);
+      const security = Number(summary.security_txt && summary.security_txt.valid || 0)
+        + Number(summary.security_txt && summary.security_txt.valid_legacy || 0);
+      const hsts = Number(summary.https_upgrade && summary.https_upgrade.hsts_active || 0);
+      const caa = Number(summary.web_dns && summary.web_dns.caa_effective && summary.web_dns.caa_effective.present || 0);
+      const point = el("div", "history-point history-point-pair");
+      point.tabIndex = 0;
+      point.dataset.latest = String(index === visible.length - 1);
+      point.dataset.label = `${dateLabel(item.generated_at)} · TLS ${ratio(tls, total)} · security.txt ${ratio(security, total)} · HSTS ${ratio(hsts, total)} · CAA ${ratio(caa, total)}`;
+      const bars = el("div", "history-bars");
+      for (const [name, value] of [["tls", tls], ["security", security], ["hsts", hsts], ["caa", caa]]) {
+        const bar = el("div", `history-bar history-bar-${name}`);
+        bar.style.height = `${Math.max(2, total ? (value / total) * 100 : 0)}%`;
+        bars.append(bar);
+      }
+      point.append(bars);
+      target.append(point);
+    }
+    caption.textContent = `${count(visible.length)} of ${count(history.length)} snapshots · TLS / security.txt / HSTS / CAA`;
   }
 
   function fillSnapshotSelector() {
@@ -239,6 +309,15 @@
         entries.push({ role, name: String(item.name), hosts: safeArray(item.observed_hosts) });
       }
     }
+    for (const item of safeArray(domain && domain.web_provider_clues)) {
+      if (!item || !item.name) continue;
+      entries.push({
+        role: "web",
+        name: String(item.name),
+        hosts: safeArray(item.observed_hosts),
+        headers: safeArray(item.observed_headers),
+      });
+    }
     return entries;
   }
 
@@ -261,8 +340,23 @@
   }
 
   function searchableText(domain) {
-    const fields = [domain.domain, domain.spf && domain.spf.record, domain.dmarc && domain.dmarc.record];
+    const fields = [
+      domain.domain,
+      domain.rank_display,
+      domain.spf && domain.spf.record,
+      domain.dmarc && domain.dmarc.record,
+      domain.web && domain.web.page && domain.web.page.title,
+    ];
     for (const item of providerNames(domain)) fields.push(item.name, ...item.hosts);
+    const headers = domain.web && domain.web.headers || {};
+    for (const value of Object.values(headers)) fields.push(...(Array.isArray(value) ? value : [value]));
+    const webDns = domain.web_dns || {};
+    for (const key of ["a", "aaaa", "cname", "https"]) {
+      fields.push(...safeArray(webDns[key] && webDns[key].records));
+      for (const link of safeArray(webDns[key] && webDns[key].cname_chain)) {
+        fields.push(link && link.owner, ...safeArray(link && link.target));
+      }
+    }
     fields.push(...safeArray(domain.spf && domain.spf.service_targets));
     for (const host of safeArray(domain.mx && domain.mx.hosts)) fields.push(host && host.hostname);
     for (const selector of safeArray(domain.dkim && domain.dkim.selectors)) {
@@ -280,6 +374,14 @@
     const provider = byId("provider-filter").value;
     const dnssecState = byId("dnssec-filter").value;
     const dkimState = byId("dkim-filter").value;
+    const rankState = byId("rank-filter").value;
+    const httpsState = byId("https-filter").value;
+    const securityTxtState = byId("securitytxt-filter").value;
+    const hstsState = byId("hsts-filter").value;
+    const caaState = byId("caa-filter").value;
+    const ipv6State = byId("ipv6-filter").value;
+    const webDnsState = byId("web-dns-filter").value;
+    const headerState = byId("header-filter").value;
     if (query && !state.searchIndex[index].includes(query)) return false;
     if (spfStatus !== "all" && (!domain.spf || domain.spf.status !== spfStatus)) return false;
     if (qualifier !== "all") {
@@ -303,6 +405,18 @@
     }
     if (dnssecState !== "all" && (!domain.dnssec || domain.dnssec.status !== dnssecState)) return false;
     if (dkimState !== "all" && (!domain.dkim || domain.dkim.status !== dkimState)) return false;
+    if (rankState !== "all" && (domain.rank_status || "in_top_1m") !== rankState) return false;
+    if (httpsState !== "all" && (!domain.web || !domain.web.tls || domain.web.tls.status !== httpsState)) return false;
+    if (securityTxtState !== "all" && (!domain.security_txt || domain.security_txt.status !== securityTxtState)) return false;
+    const hsts = domain.web && domain.web.https_upgrade && domain.web.https_upgrade.hsts;
+    if (hstsState === "active" && !(hsts && hsts.active)) return false;
+    if (hstsState === "inactive" && (hsts && hsts.active)) return false;
+    const caa = domain.web_dns && domain.web_dns.caa && domain.web_dns.caa.effective;
+    if (caaState !== "all" && (!caa || caa.status !== (caaState === "present" ? "present" : caaState))) return false;
+    const ipv6 = domain.web_dns && domain.web_dns.aaaa;
+    if (ipv6State !== "all" && (!ipv6 || ipv6.status !== (ipv6State === "present" ? "present" : ipv6State))) return false;
+    if (webDnsState !== "all" && (!domain.web_dns || !domain.web_dns[webDnsState] || domain.web_dns[webDnsState].status !== "present")) return false;
+    if (headerState !== "all" && !(domain.web && domain.web.header_presence && domain.web.header_presence[headerState])) return false;
     return true;
   }
 
@@ -329,7 +443,7 @@
       unique.push(item);
     }
     for (const item of unique.slice(0, 3)) {
-      const role = item.role === "outbound" ? "Send" : item.role === "inbound" ? "Receive" : "Reports";
+      const role = item.role === "outbound" ? "Send" : item.role === "inbound" ? "Receive" : item.role === "reporting" ? "Reports" : "Web";
       wrapper.append(el("span", `service-chip ${item.name === "Unclassified" ? "unknown" : ""}`, `${role}: ${item.name}`));
     }
     if (unique.length > 3) wrapper.append(el("span", "service-chip", `+${unique.length - 3}`));
@@ -345,6 +459,42 @@
     }
     const hosts = safeArray(mx.hosts).map((item) => item && item.hostname).filter(Boolean);
     cell.textContent = hosts.length ? hosts.slice(0, 2).join("\n") : displayStatus(mx.status)[0];
+    return cell;
+  }
+
+  function makeHttpsCell(domain) {
+    const cell = el("div", "posture-cell");
+    const web = domain.web || {};
+    const tls = web.tls || {};
+    cell.append(makePill(tls.status || "unavailable"));
+    const upgrade = web.https_upgrade || {};
+    const signs = [];
+    if (upgrade.redirects_to_https) signs.push("redirect");
+    if (upgrade.meta_refresh_to_https) signs.push("meta refresh");
+    if (upgrade.hsts && upgrade.hsts.active) signs.push(`HSTS ${upgrade.hsts.max_age}s`);
+    cell.append(el("div", "domain-meta", signs.length ? signs.join(" · ") : "No HTTPS upgrade observed"));
+    return cell;
+  }
+
+  function makeSecurityTxtCell(domain) {
+    const cell = el("div", "posture-cell");
+    const securityTxt = domain.security_txt || {};
+    cell.append(makePill(securityTxt.status || "not_collected"));
+    if (securityTxt.preferred_path) cell.append(el("div", "domain-meta", securityTxt.preferred_path));
+    return cell;
+  }
+
+  function makeWebDnsCell(domain) {
+    const cell = el("div", "extra-list web-dns-list");
+    const dns = domain.web_dns || {};
+    const a = safeArray(dns.a && dns.a.records).length;
+    const aaaa = safeArray(dns.aaaa && dns.aaaa.records).length;
+    const caa = dns.caa && dns.caa.effective || {};
+    const cname = safeArray(dns.cname && dns.cname.records);
+    cell.append(el("span", `extra-chip ${a ? "good" : ""}`, `A ${a}`));
+    cell.append(el("span", `extra-chip ${aaaa ? "good" : ""}`, `AAAA ${aaaa}`));
+    if (cname.length) cell.append(el("span", "extra-chip", "CNAME"));
+    cell.append(el("span", `extra-chip ${caa.status === "present" ? "good" : caa.status === "lookup_error" ? "warn" : ""}`, `CAA ${caa.status === "present" ? caa.source || "yes" : caa.status === "lookup_error" ? "error" : "none"}`));
     return cell;
   }
 
@@ -397,11 +547,40 @@
   function createDetailRow(domain) {
     const row = el("tr", "detail-row");
     const cell = el("td");
-    cell.colSpan = 7;
+    cell.colSpan = 10;
     const content = el("div", "detail-content");
     const spf = domain.spf || {};
     const dmarc = domain.dmarc || {};
     const terminal = spf.terminal;
+    appendDetailBlock(content, "Current and last-known rank", {
+      current_status: domain.rank_status,
+      current_global_rank: domain.rank,
+      current_display: domain.rank_display,
+      current_au_position: domain.au_rank,
+      current_au_total: domain.au_rank_total,
+      last_global_rank: domain.last_rank,
+      last_au_position: domain.last_au_rank,
+      last_rank_list_id: domain.last_rank_list_id,
+      last_ranked_at: domain.last_ranked_at,
+      first_seen_at: domain.first_seen_at,
+    });
+    const web = domain.web || {};
+    appendDetailBlock(content, "HTTP and HTTPS HEAD / GET observations", {
+      page: web.page,
+      http: web.requests && web.requests.http,
+      https: web.requests && web.requests.https,
+    }, true);
+    appendDetailBlock(content, "HTTPS upgrade evidence", web.https_upgrade || {});
+    appendDetailBlock(content, "TLS certificate and negotiated connection", web.tls || {});
+    appendDetailBlock(content, "security.txt resources and validation", domain.security_txt || {}, true);
+    appendDetailBlock(content, "Selected HTTPS headers and observations", {
+      headers: web.headers,
+      header_presence: web.header_presence,
+      findings: web.header_findings,
+      cookie_names_and_attributes: web.headers && web.headers["set-cookie-metadata"],
+      web_provider_clues: domain.web_provider_clues,
+    }, true);
+    appendDetailBlock(content, "Web DNS evidence", domain.web_dns || {}, true);
     appendDetailBlock(content, "SPF record", spf.record || spf.error || "No SPF record found");
     appendDetailBlock(content, "SPF ending", terminal ? {
       effective_result: terminal.label,
@@ -430,6 +609,7 @@
       nameservers: domain.nameservers,
       soa: domain.soa,
       provider_clues: domain.provider_clues,
+      web_provider_clues: domain.web_provider_clues,
     }, true);
     if (domain.errors && Object.keys(domain.errors).length) appendDetailBlock(content, "Lookup and collection errors", domain.errors, true);
     cell.append(content);
@@ -441,10 +621,15 @@
     const fragment = document.createDocumentFragment();
     for (const domain of domains) {
       const row = el("tr", "data-row");
-      const rank = el("td", "rank-cell", `#${count(domain.rank)}`);
+      const rank = el("td", "rank-cell");
+      rank.append(el("span", "rank-primary", domain.rank_display || (domain.rank ? `#${count(domain.rank)}` : ">1,000,000")));
+      if (domain.au_rank) rank.append(el("span", "domain-meta", `.au ${count(domain.au_rank)} / ${count(domain.au_rank_total)}`));
+      else if (domain.last_rank) rank.append(el("span", "domain-meta", `last #${count(domain.last_rank)} · .au ${count(domain.last_au_rank)}`));
       const domainCell = el("td");
       domainCell.append(el("div", "domain-name", domain.domain));
-      const detailButton = el("button", "detail-toggle", "Inspect DNS");
+      const title = domain.web && domain.web.page && domain.web.page.title;
+      if (title) domainCell.append(el("div", "domain-meta page-title", title));
+      const detailButton = el("button", "detail-toggle", "Inspect posture");
       detailButton.type = "button";
       detailButton.setAttribute("aria-expanded", "false");
       domainCell.append(detailButton);
@@ -462,20 +647,27 @@
       const p = dmarc.policy && dmarc.policy.p;
       if (p) dmarcCell.append(el("div", "policy-label", `p=${String(p).toLowerCase()}${dmarc.discovery_source === "inherited" ? " · inherited" : ""}`));
 
+      const httpsCell = el("td");
+      httpsCell.append(makeHttpsCell(domain));
+      const securityCell = el("td");
+      securityCell.append(makeSecurityTxtCell(domain));
+      const webDnsCell = el("td");
+      webDnsCell.append(makeWebDnsCell(domain));
+
       const serviceCell = el("td");
       serviceCell.append(makeServiceChips(domain));
       const mxCell = el("td");
       mxCell.append(makeMxList(domain));
       const extraCell = el("td");
       extraCell.append(makeExtras(domain));
-      row.append(rank, domainCell, spfCell, dmarcCell, serviceCell, mxCell, extraCell);
+      row.append(rank, domainCell, spfCell, dmarcCell, httpsCell, securityCell, webDnsCell, serviceCell, mxCell, extraCell);
 
       const details = createDetailRow(domain);
       details.hidden = true;
       detailButton.addEventListener("click", () => {
         details.hidden = !details.hidden;
         detailButton.setAttribute("aria-expanded", String(!details.hidden));
-        detailButton.textContent = details.hidden ? "Inspect DNS" : "Hide details";
+        detailButton.textContent = details.hidden ? "Inspect posture" : "Hide details";
       });
       fragment.append(row, details);
     }
@@ -492,7 +684,7 @@
     if (!visible.length) {
       const row = el("tr");
       const cell = el("td", "empty-cell", state.hasData ? "No domains match these filters." : "No scan has been published yet.");
-      cell.colSpan = 7;
+      cell.colSpan = 10;
       row.append(cell);
       tbody.append(row);
     } else {
@@ -524,11 +716,20 @@
     const response = await fetch(new URL(entry.path, DATA_INDEX_URL), { cache: "no-cache" });
     if (!response.ok) throw new Error(`Snapshot request failed (${response.status})`);
     const snapshot = await response.json();
+    if (snapshot.schema_version !== 3) throw new Error(`Unsupported snapshot schema ${snapshot.schema_version}`);
     if (!Array.isArray(snapshot.domains)) throw new Error("Snapshot is missing its domain list");
     state.snapshot = snapshot;
     state.rawArchive = snapshot.raw_archive || entry.raw_archive || null;
     if (state.rawArchive) byId("download-raw").href = new URL(state.rawArchive, DATA_INDEX_URL).href;
-    state.domains = snapshot.domains;
+    state.domains = snapshot.domains.slice().sort((left, right) => {
+      const leftRank = left.rank === null || left.rank === undefined ? Number.MAX_SAFE_INTEGER : Number(left.rank);
+      const rightRank = right.rank === null || right.rank === undefined ? Number.MAX_SAFE_INTEGER : Number(right.rank);
+      const leftLast = Number(left.last_rank || Number.MAX_SAFE_INTEGER);
+      const rightLast = Number(right.last_rank || Number.MAX_SAFE_INTEGER);
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      if (leftRank === Number.MAX_SAFE_INTEGER && leftLast !== rightLast) return leftLast - rightLast;
+      return String(left.domain).localeCompare(String(right.domain));
+    });
     state.searchIndex = state.domains.map(searchableText);
     state.hasData = true;
     state.page = 1;
@@ -536,6 +737,7 @@
     setMetricCards(snapshot);
     drawPolicyChart(snapshot);
     drawSignalsChart(snapshot);
+    drawWebHistoryChart();
     populateProviderFilter();
     getFilteredDomains();
     byId("empty-state").hidden = state.domains.length !== 0;
@@ -546,6 +748,7 @@
       const response = await fetch(DATA_INDEX_URL, { cache: "no-cache" });
       if (!response.ok) throw new Error(`Index request failed (${response.status})`);
       state.index = await response.json();
+      if (state.index.schema_version !== 3) throw new Error(`Unsupported data index schema ${state.index.schema_version}`);
       drawHistoryChart();
       fillSnapshotSelector();
       const snapshots = safeArray(state.index.snapshots).slice().sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at));
@@ -554,6 +757,7 @@
         byId("metrics").replaceChildren();
         byId("policy-chart").textContent = "No scans yet";
         byId("signals-chart").textContent = "No scans yet";
+        byId("web-history-chart").textContent = "No scans yet";
         state.filtered = [];
         setSnapshotMeta(null);
         byId("empty-state").hidden = false;
@@ -572,7 +776,7 @@
       byId("domain-rows").replaceChildren();
       const row = el("tr");
       const cell = el("td", "empty-cell", "The snapshot could not be loaded.");
-      cell.colSpan = 7;
+      cell.colSpan = 10;
       row.append(cell);
       byId("domain-rows").append(row);
     }
@@ -596,51 +800,71 @@
   }
 
   function exportCSV() {
-    const rows = [[
-      "rank", "domain", "spf_status", "spf_record", "spf_terminal", "spf_dns_lookups",
-      "dmarc_status", "dmarc_policy", "dmarc_source", "outbound_services",
-      "inbound_services", "reporting_services", "mx_hosts", "mta_sts_status",
-      "tls_reporting_status", "dnssec_validated",
-      "dnssec_status", "mx_dnssec_issues", "mx_dnssec_unsigned", "dkim_status", "dkim_found_selectors", "nameservers", "soa",
-    ]];
+    const headers = [
+      "domain", "rank_status", "rank_display", "tranco_rank", "au_rank", "au_rank_total",
+      "last_rank", "last_au_rank", "last_rank_list_id", "last_ranked_at", "first_seen_at",
+      "spf_status", "spf_valid", "spf_record", "spf_terminal", "spf_dns_lookups", "spf_void_lookups", "spf_mechanisms", "spf_services",
+      "dmarc_status", "dmarc_valid", "dmarc_record", "dmarc_location", "dmarc_source", "dmarc_policy_p", "dmarc_policy_sp", "dmarc_policy_np", "dmarc_alignment", "dmarc_test_mode", "dmarc_reporting_uris",
+      "outbound_services", "inbound_services", "reporting_services", "web_services", "web_service_evidence",
+      "mx_hosts", "mta_sts_status", "tls_reporting_status", "dnssec_status", "dnssec_evidence", "mx_dnssec_evidence", "dkim_status", "dkim_found_selectors", "nameservers", "soa",
+      "page_title", "http_head", "http_get", "https_head", "https_get", "https_upgrade", "tls_status", "tls_certificates",
+      "security_txt_status", "security_txt_preferred_path", "security_txt_preferred_scheme", "security_txt_validation", "security_txt_text",
+      "security_headers_source", "security_headers", "security_header_presence", "security_header_findings", "web_dns_a", "web_dns_aaaa", "web_dns_cname", "web_dns_https", "caa_direct", "caa_effective", "errors",
+    ];
+    const rows = [headers];
+    const serialize = (value) => value === null || value === undefined ? "" : typeof value === "object" ? JSON.stringify(value) : value;
     for (const domain of state.filtered) {
       const providers = domain.provider_clues || {};
       const names = (role) => safeArray(providers[role]).map((item) => item.name).join("; ");
+      const securityProviders = safeArray(domain.web_provider_clues);
+      const web = domain.web || {};
+      const securityTxt = domain.security_txt || {};
+      const preferredResource = safeArray(securityTxt.resources).find((item) => item.path === securityTxt.preferred_path && item.scheme === securityTxt.preferred_scheme);
+      const dns = domain.web_dns || {};
       const terminal = domain.spf && domain.spf.terminal;
       rows.push([
-        domain.rank,
-        domain.domain,
-        domain.spf && domain.spf.status,
-        domain.spf && domain.spf.record,
-        terminal && `${terminal.token || "implicit"} · ${terminal.outcome}`,
-        domain.spf && domain.spf.dns_lookups,
-        domain.dmarc && domain.dmarc.status,
+        domain.domain, domain.rank_status, domain.rank_display, domain.rank, domain.au_rank, domain.au_rank_total,
+        domain.last_rank, domain.last_au_rank, domain.last_rank_list_id, domain.last_ranked_at, domain.first_seen_at,
+        domain.spf && domain.spf.status, domain.spf && domain.spf.valid, domain.spf && domain.spf.record,
+        terminal && `${terminal.token || "implicit"} · ${terminal.outcome}`, domain.spf && domain.spf.dns_lookups,
+        domain.spf && domain.spf.void_dns_lookups, serialize(domain.spf && domain.spf.mechanisms),
+        safeArray(domain.spf && domain.spf.service_targets).join("; "),
+        domain.dmarc && domain.dmarc.status, domain.dmarc && domain.dmarc.valid, domain.dmarc && domain.dmarc.record,
+        domain.dmarc && domain.dmarc.location, domain.dmarc && domain.dmarc.discovery_source,
         domain.dmarc && domain.dmarc.policy && domain.dmarc.policy.p,
-        domain.dmarc && domain.dmarc.location,
-        names("outbound"),
-        names("inbound"),
-        names("reporting"),
+        domain.dmarc && domain.dmarc.policy && domain.dmarc.policy.sp,
+        domain.dmarc && domain.dmarc.policy && domain.dmarc.policy.np,
+        serialize(domain.dmarc && domain.dmarc.alignment), domain.dmarc && domain.dmarc.test_mode,
+        serialize(domain.dmarc && domain.dmarc.reporting_uris),
+        names("outbound"), names("inbound"), names("reporting"),
+        securityProviders.map((item) => item.name).join("; "), serialize(securityProviders),
         safeArray(domain.mx && domain.mx.hosts).map((item) => item.hostname).join("; "),
-        domain.mta_sts && domain.mta_sts.status,
-        domain.tls_reporting && domain.tls_reporting.status,
-        domain.dnssec && domain.dnssec.validated,
-        domain.dnssec && domain.dnssec.status,
-        safeArray(domain.mx && domain.mx.hosts).filter((host) => host && ["broken", "lookup_error"].includes(host.dnssec_status)).length,
-        safeArray(domain.mx && domain.mx.hosts).filter((host) => host && host.dnssec_status === "unsigned").length,
-        domain.dkim && domain.dkim.status,
-        safeArray(domain.dkim && domain.dkim.found_selectors).join("; "),
-        safeArray(domain.nameservers && domain.nameservers.nameservers || domain.nameservers).join("; "),
-        JSON.stringify(domain.soa || ""),
+        domain.mta_sts && domain.mta_sts.status, domain.tls_reporting && domain.tls_reporting.status,
+        domain.dnssec && domain.dnssec.status, serialize(domain.dnssec),
+        serialize(safeArray(domain.mx && domain.mx.hosts).map((host) => ({ hostname: host.hostname, status: host.dnssec_status, evidence: host.dnssec_evidence }))),
+        domain.dkim && domain.dkim.status, safeArray(domain.dkim && domain.dkim.found_selectors).join("; "),
+        safeArray(domain.nameservers && domain.nameservers.nameservers || domain.nameservers).join("; "), serialize(domain.soa),
+        web.page && web.page.title,
+        serialize(web.requests && web.requests.http && web.requests.http.head),
+        serialize(web.requests && web.requests.http && web.requests.http.get),
+        serialize(web.requests && web.requests.https && web.requests.https.head),
+        serialize(web.requests && web.requests.https && web.requests.https.get),
+        serialize(web.https_upgrade), web.tls && web.tls.status, serialize(web.tls && web.tls.certificates),
+        securityTxt.status, securityTxt.preferred_path, securityTxt.preferred_scheme,
+        serialize(preferredResource && preferredResource.validation), preferredResource ? preferredResource.raw_text : securityTxt.raw_text,
+        web.headers_source, serialize(web.headers), serialize(web.header_presence), serialize(web.header_findings),
+        serialize(dns.a), serialize(dns.aaaa), serialize(dns.cname), serialize(dns.https),
+        serialize(dns.caa && dns.caa.direct), serialize(dns.caa && dns.caa.effective), serialize(domain.errors),
       ]);
     }
     const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
     const id = state.snapshot && state.snapshot.generated_at ? state.snapshot.generated_at.slice(0, 10) : "snapshot";
-    downloadFile(`au-mail-auth-${id}-filtered.csv`, `\uFEFF${csv}`, "text/csv;charset=utf-8");
+    downloadFile(`au-security-posture-${id}-filtered.csv`, `\uFEFF${csv}`, "text/csv;charset=utf-8");
   }
 
   function exportJSON() {
     const id = state.snapshot && state.snapshot.generated_at ? state.snapshot.generated_at.slice(0, 10) : "snapshot";
-    downloadFile(`au-mail-auth-${id}.json`, JSON.stringify(state.snapshot, null, 2), "application/json;charset=utf-8");
+    downloadFile(`au-security-posture-${id}.json`, JSON.stringify(state.snapshot, null, 2), "application/json;charset=utf-8");
   }
 
   byId("snapshot-select").addEventListener("change", async (event) => {
@@ -655,7 +879,11 @@
     }
   });
 
-  for (const id of ["search-input", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "dkim-filter"]) {
+  for (const id of [
+    "search-input", "rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter",
+    "provider-filter", "dnssec-filter", "dkim-filter", "https-filter", "securitytxt-filter",
+    "hsts-filter", "caa-filter", "ipv6-filter", "web-dns-filter", "header-filter",
+  ]) {
     byId(id).addEventListener(id === "search-input" ? "input" : "change", () => {
       state.page = 1;
       getFilteredDomains();

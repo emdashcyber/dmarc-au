@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect a ranked snapshot of .au email-authentication DNS records."""
+"""Collect ranked email, web, TLS, and DNS posture snapshots for .au names."""
 
 from __future__ import annotations
 
@@ -23,10 +23,13 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from collector.web_checks import cached_address_resolver, probe_web, probe_web_dns
 
-SCHEMA_VERSION = 2
+
+SCHEMA_VERSION = 3
 SHARD_SIZE = 200
 PROGRESS_INTERVAL = 25
+DOMAIN_WORKERS_PER_SHARD = 4
 DKIM_SELECTORS = (
     "default",
     "dkim",
@@ -509,12 +512,89 @@ def infer_provider_clues(
     return result
 
 
+def infer_web_provider_clues(
+    web_dns: Any,
+    web: Any,
+    catalog: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Infer web vendors from CNAME destinations and identifying response headers."""
+    if not isinstance(web_dns, Mapping):
+        web_dns = {}
+    if not isinstance(web, Mapping):
+        web = {}
+    hosts: set[str] = set()
+    cname = web_dns.get("cname")
+    if isinstance(cname, Mapping):
+        for value in cname.get("records", []) or []:
+            host = normalize_domain(str(value).split()[0])
+            if host:
+                hosts.add(host)
+        for link in cname.get("cname_chain", []) or []:
+            if isinstance(link, Mapping):
+                for target in link.get("target", []) or []:
+                    host = normalize_domain(str(target))
+                    if host:
+                        hosts.add(host)
+
+    headers = web.get("headers") if isinstance(web.get("headers"), Mapping) else {}
+    observed_headers = {
+        str(name).lower(): [str(value) for value in (values if isinstance(values, list) else [values])]
+        for name, values in headers.items()
+        if values is not None
+    }
+    providers = catalog.get("providers", []) if isinstance(catalog, Mapping) else []
+    matches: dict[str, dict[str, Any]] = {}
+
+    def clue(name: str) -> dict[str, Any]:
+        return matches.setdefault(name, {"name": name, "observed_hosts": [], "observed_headers": []})
+
+    for host in sorted(hosts):
+        best: tuple[int, str] | None = None
+        for provider in providers:
+            if not isinstance(provider, Mapping):
+                continue
+            for suffix in provider.get("web_hosts", []) or []:
+                normalized_suffix = normalize_domain(str(suffix))
+                if _host_matches(host, normalized_suffix):
+                    candidate = (
+                        len(normalized_suffix),
+                        str(provider.get("web_name") or provider.get("name") or "Unknown"),
+                    )
+                    if best is None or candidate[0] > best[0]:
+                        best = candidate
+        name = best[1] if best else "Unclassified"
+        item = clue(name)
+        if host not in item["observed_hosts"]:
+            item["observed_hosts"].append(host)
+
+    for provider in providers:
+        if not isinstance(provider, Mapping):
+            continue
+        provider_name = str(provider.get("web_name") or provider.get("name") or "Unknown")
+        for rule in provider.get("web_headers", []) or []:
+            if not isinstance(rule, Mapping):
+                continue
+            header_name = str(rule.get("name") or "").lower()
+            fragment = str(rule.get("contains") or "").lower()
+            if not header_name:
+                continue
+            for value in observed_headers.get(header_name, []):
+                if not fragment or fragment in value.lower():
+                    item = clue(provider_name)
+                    evidence = {"name": header_name, "value": value}
+                    if evidence not in item["observed_headers"]:
+                        item["observed_headers"].append(evidence)
+
+    return list(matches.values())
+
+
 def normalize_domain_result(
     domain: str,
-    rank: int,
+    rank: int | None,
     raw_result: Any,
     provider_catalog: Mapping[str, Any] | None = None,
     collection_error: str | None = None,
+    rank_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = json_safe(raw_result)
     if not isinstance(result, Mapping):
@@ -524,6 +604,8 @@ def normalize_domain_result(
     if isinstance(result.get("checkdmarc"), Mapping):
         auxiliary = result
         result = result["checkdmarc"]
+    if collection_error is None and auxiliary.get("email_collection_error"):
+        collection_error = str(auxiliary.get("email_collection_error"))
 
     spf = result.get("spf")
     dmarc = result.get("dmarc")
@@ -661,6 +743,12 @@ def normalize_domain_result(
         report_hosts,
         provider_catalog or {},
     )
+    web_dns_raw = auxiliary.get("web_dns") if isinstance(auxiliary.get("web_dns"), Mapping) else {}
+    web_provider_clues = infer_web_provider_clues(
+        web_dns_raw,
+        auxiliary.get("web"),
+        provider_catalog or {},
+    )
 
     dnssec = result.get("dnssec")
     dnssec_evidence = auxiliary.get("dnssec_evidence") if isinstance(auxiliary, Mapping) else None
@@ -713,6 +801,7 @@ def normalize_domain_result(
 
     nameservers = result.get("ns")
     soa = result.get("soa")
+    raw_web = auxiliary.get("web") if isinstance(auxiliary.get("web"), Mapping) else {}
 
     errors = {
         key: value
@@ -723,11 +812,42 @@ def normalize_domain_result(
             "mta_sts": extra_signal(mta_sts)["error"],
             "tls_reporting": extra_signal(tls_report)["error"],
             "collection": collection_error,
+            "web": raw_web.get("error"),
         }.items()
         if value
     }
+    rank_info = dict(rank_metadata or {})
+    rank_status = rank_info.get("rank_status", "in_top_1m" if rank is not None else "outside_top_1m")
+    rank_display = rank_info.get("rank_display", f"#{rank:,}" if rank is not None else ">1,000,000")
+    web = raw_web if isinstance(raw_web, Mapping) else None
+    web = dict(web) if web is not None else {
+        "status": "not_collected",
+        "tls": {"status": "not_collected", "certificates": [], "errors": []},
+        "https_upgrade": {},
+        "headers": {},
+        "header_presence": {},
+        "security_txt": {"status": "not_collected", "resources": []},
+    }
+    web_dns = auxiliary.get("web_dns") if isinstance(auxiliary.get("web_dns"), Mapping) else None
+    if web_dns is None:
+        web_dns = {
+            "a": {"status": "not_collected", "records": [], "error": None},
+            "aaaa": {"status": "not_collected", "records": [], "error": None},
+            "cname": {"status": "not_collected", "records": [], "error": None},
+            "https": {"status": "not_collected", "records": [], "error": None},
+            "caa": {"direct": {"status": "not_collected"}, "effective": {"status": "not_collected"}},
+        }
     return {
         "rank": rank,
+        "rank_status": rank_status,
+        "rank_display": rank_display,
+        "au_rank": rank_info.get("au_rank"),
+        "au_rank_total": rank_info.get("au_rank_total"),
+        "last_rank": rank_info.get("last_rank", rank),
+        "last_au_rank": rank_info.get("last_au_rank", rank_info.get("au_rank")),
+        "last_rank_list_id": rank_info.get("last_rank_list_id"),
+        "last_ranked_at": rank_info.get("last_ranked_at"),
+        "first_seen_at": rank_info.get("first_seen_at"),
         "domain": normalize_domain(domain),
         "spf": spf_data,
         "dmarc": dmarc_data,
@@ -740,12 +860,71 @@ def normalize_domain_result(
         "nameservers": json_safe(nameservers),
         "soa": json_safe(soa),
         "provider_clues": providers,
+        "web": json_safe(web),
+        "web_dns": json_safe(web_dns),
+        "web_provider_clues": json_safe(web_provider_clues),
+        "security_txt": json_safe(web.get("security_txt") or {"status": "not_collected", "resources": []}),
         "errors": errors,
     }
 
 
 def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {"domain_count": len(domains)}
+    rank_counts = {"in_top_1m": 0, "outside_top_1m": 0}
+    tls_counts: dict[str, int] = {}
+    security_txt_counts: dict[str, int] = {}
+    web_dns_counts: dict[str, dict[str, int]] = {
+        key: {"present": 0, "absent": 0, "lookup_error": 0, "not_collected": 0}
+        for key in ("a", "aaaa", "cname", "https", "caa_direct", "caa_effective")
+    }
+    header_counts: dict[str, int] = {}
+    web_provider_counts: dict[str, int] = {}
+    upgrade_counts = {"redirects_to_https": 0, "meta_refresh_to_https": 0, "hsts_active": 0}
+    for domain in domains:
+        rank_status = str(domain.get("rank_status") or "in_top_1m")
+        rank_counts[rank_status] = rank_counts.get(rank_status, 0) + 1
+        web = domain.get("web") if isinstance(domain.get("web"), Mapping) else {}
+        tls = web.get("tls") if isinstance(web.get("tls"), Mapping) else {}
+        tls_status = str(tls.get("status") or "unknown")
+        tls_counts[tls_status] = tls_counts.get(tls_status, 0) + 1
+        security_txt = domain.get("security_txt") if isinstance(domain.get("security_txt"), Mapping) else {}
+        security_status = str(security_txt.get("status") or "unknown")
+        security_txt_counts[security_status] = security_txt_counts.get(security_status, 0) + 1
+        presence = web.get("header_presence") if isinstance(web.get("header_presence"), Mapping) else {}
+        for header, found in presence.items():
+            if found:
+                header_counts[str(header)] = header_counts.get(str(header), 0) + 1
+        seen_web_providers: set[str] = set()
+        for clue in domain.get("web_provider_clues", []) or []:
+            if isinstance(clue, Mapping) and clue.get("name"):
+                seen_web_providers.add(str(clue["name"]))
+        for provider_name in seen_web_providers:
+            web_provider_counts[provider_name] = web_provider_counts.get(provider_name, 0) + 1
+        upgrades = web.get("https_upgrade") if isinstance(web.get("https_upgrade"), Mapping) else {}
+        if upgrades.get("redirects_to_https"):
+            upgrade_counts["redirects_to_https"] += 1
+        if upgrades.get("meta_refresh_to_https"):
+            upgrade_counts["meta_refresh_to_https"] += 1
+        hsts = upgrades.get("hsts") if isinstance(upgrades.get("hsts"), Mapping) else {}
+        if hsts.get("active"):
+            upgrade_counts["hsts_active"] += 1
+        web_dns = domain.get("web_dns") if isinstance(domain.get("web_dns"), Mapping) else {}
+        for key in ("a", "aaaa", "cname", "https"):
+            section = web_dns.get(key) if isinstance(web_dns.get(key), Mapping) else {}
+            status = str(section.get("status") or "not_collected")
+            web_dns_counts[key][status] = web_dns_counts[key].get(status, 0) + 1
+        caa = web_dns.get("caa") if isinstance(web_dns.get("caa"), Mapping) else {}
+        for key, path in (("caa_direct", "direct"), ("caa_effective", "effective")):
+            section = caa.get(path) if isinstance(caa.get(path), Mapping) else {}
+            status = str(section.get("status") or "not_collected")
+            web_dns_counts[key][status] = web_dns_counts[key].get(status, 0) + 1
+    summary["rank_status"] = rank_counts
+    summary["web_tls"] = tls_counts
+    summary["security_txt"] = security_txt_counts
+    summary["web_dns"] = web_dns_counts
+    summary["security_headers"] = header_counts
+    summary["web_provider_clues"] = web_provider_counts
+    summary["https_upgrade"] = upgrade_counts
     for family in ("spf", "dmarc", "mx", "mta_sts", "tls_reporting"):
         family_counts = {key: 0 for key in ("present_valid", "present_invalid", "absent", "lookup_error")}
         for domain in domains:
@@ -819,6 +998,10 @@ def load_index(path: Path) -> dict[str, Any]:
         raise ScanError(f"Existing snapshot index is unreadable; preserving it: {error}") from error
     if not isinstance(value, dict) or not isinstance(value.get("snapshots"), list):
         raise ScanError("Existing snapshot index has an unexpected format; preserving it")
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise ScanError(
+            f"Snapshot index schema {value.get('schema_version')} is incompatible with schema {SCHEMA_VERSION}; reset site/data first"
+        )
     if not all(isinstance(item, dict) for item in value["snapshots"]):
         raise ScanError("Existing snapshot index contains an invalid entry; preserving it")
     return value
@@ -939,8 +1122,13 @@ def probe_dkim_selectors(
 
 
 def collect_domain(domain: str) -> dict[str, Any]:
-    """Collect checkdmarc output and additional DNS-only evidence for one name."""
-    checked = check_domain(domain)
+    """Collect mail, web, TLS, and DNS signals independently for one name."""
+    email_error = None
+    try:
+        checked = check_domain(domain)
+    except Exception as error:
+        checked = {}
+        email_error = f"{type(error).__name__}: {error}"
     if isinstance(checked, Mapping) and isinstance(checked.get("checkdmarc"), Mapping):
         checkdmarc_result = checked["checkdmarc"]
         runtime_diagnostics = checked.get("runtime_diagnostics", [])
@@ -948,14 +1136,45 @@ def collect_domain(domain: str) -> dict[str, Any]:
         checkdmarc_result = checked
         runtime_diagnostics = []
     dnssec_value = checkdmarc_result.get("dnssec") if isinstance(checkdmarc_result, Mapping) else None
-    return {
-        "checkdmarc": json_safe(checkdmarc_result),
-        "runtime_diagnostics": json_safe(runtime_diagnostics),
-        "dnssec_evidence": {
+    try:
+        dnssec_evidence = {
             **probe_dnssec(domain, dnssec_value if isinstance(dnssec_value, bool) else None),
             "mx_hosts": _dnssec_mx_diagnostics(runtime_diagnostics),
-        },
-        "dkim": probe_dkim_selectors(domain),
+        }
+    except Exception as error:
+        dnssec_evidence = {"status": "lookup_error", "ds": {}, "dnskey": {}, "mx_hosts": [], "explanation": str(error)}
+    try:
+        dkim_evidence = probe_dkim_selectors(domain)
+    except Exception as error:
+        dkim_evidence = {"probe_scope": "common_selectors_only", "selectors": [{"status": "lookup_error", "error": str(error)}]}
+    try:
+        web_dns = probe_web_dns(domain)
+    except Exception as error:
+        failed_dns = {"status": "lookup_error", "records": [], "error": str(error)}
+        web_dns = {
+            **{key: dict(failed_dns) for key in ("a", "aaaa", "cname", "https")},
+            "caa": {"direct": dict(failed_dns), "effective": {**failed_dns, "owner": domain, "source": "lookup_error"}},
+        }
+    try:
+        web = probe_web(domain, address_resolver=cached_address_resolver(domain, web_dns))
+    except Exception as error:
+        web = {
+            "status": "lookup_error",
+            "tls": {"status": "lookup_error", "certificates": [], "errors": [str(error)]},
+            "https_upgrade": {},
+            "headers": {},
+            "header_presence": {},
+            "security_txt": {"status": "lookup_error", "resources": [], "error": str(error)},
+            "error": f"{type(error).__name__}: {error}",
+        }
+    return {
+        "checkdmarc": json_safe(checkdmarc_result),
+        "email_collection_error": email_error,
+        "runtime_diagnostics": json_safe(runtime_diagnostics),
+        "dnssec_evidence": json_safe(dnssec_evidence),
+        "dkim": json_safe(dkim_evidence),
+        "web_dns": json_safe(web_dns),
+        "web": json_safe(web),
     }
 
 
@@ -966,14 +1185,16 @@ def _scan_entries(
     delay_seconds: float,
     progress_interval: int = PROGRESS_INTERVAL,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    normalized: list[dict[str, Any]] = []
-    raw_records: list[dict[str, Any]] = []
+    normalized: list[dict[str, Any] | None] = [None] * len(entries)
+    raw_records: list[dict[str, Any] | None] = [None] * len(entries)
     counts: dict[str, int] = {}
     started = time.monotonic()
     total = len(entries)
-    for index, entry in enumerate(entries):
+    completed_count = 0
+
+    def collect_one(index: int, entry: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         domain = normalize_domain(str(entry["domain"]))
-        rank = int(entry["rank"])
+        rank = int(entry["rank"]) if entry.get("rank") is not None else None
         raw: Any = {}
         collection_error = None
         try:
@@ -988,39 +1209,101 @@ def _scan_entries(
             raw,
             provider_catalog=provider_catalog,
             collection_error=collection_error,
+            rank_metadata=entry,
         )
-        normalized.append(normalized_row)
-        raw_records.append({"rank": rank, "domain": domain, "raw": json_safe(raw), "collection_error": collection_error})
-        for family in ("spf", "dmarc"):
-            section = normalized_row.get(family) or {}
-            key = f"{family}_{section.get('status', 'unknown')}"
-            counts[key] = counts.get(key, 0) + 1
-        dnssec_status = str((normalized_row.get("dnssec") or {}).get("status", "unknown"))
-        counts[f"dnssec_{dnssec_status}"] = counts.get(f"dnssec_{dnssec_status}", 0) + 1
-        dkim_status = str((normalized_row.get("dkim") or {}).get("status", "unknown"))
-        counts[f"dkim_{dkim_status}"] = counts.get(f"dkim_{dkim_status}", 0) + 1
+        raw_record = {
+            "rank": rank,
+            "rank_status": normalized_row["rank_status"],
+            "au_rank": normalized_row["au_rank"],
+            "au_rank_total": normalized_row["au_rank_total"],
+            "last_rank": normalized_row["last_rank"],
+            "last_au_rank": normalized_row["last_au_rank"],
+            "domain": domain,
+            "raw": json_safe(raw),
+            "collection_error": collection_error,
+        }
+        return normalized_row, raw_record
 
-        completed = index + 1
-        if completed % progress_interval == 0 or completed == total:
+    def report_progress(completed_domain: str) -> None:
+        nonlocal completed_count
+        completed_count += 1
+        # Counts are computed over completed rows; the bounded future set keeps this cheap.
+        counts.clear()
+        for row in normalized:
+            if row is None:
+                continue
+            for family in ("spf", "dmarc"):
+                section = row.get(family) or {}
+                key = f"{family}_{section.get('status', 'unknown')}"
+                counts[key] = counts.get(key, 0) + 1
+            dnssec_status = str((row.get("dnssec") or {}).get("status", "unknown"))
+            counts[f"dnssec_{dnssec_status}"] = counts.get(f"dnssec_{dnssec_status}", 0) + 1
+            dkim_status = str((row.get("dkim") or {}).get("status", "unknown"))
+            counts[f"dkim_{dkim_status}"] = counts.get(f"dkim_{dkim_status}", 0) + 1
+        if completed_count % progress_interval == 0 or completed_count == total:
             elapsed = max(0.001, time.monotonic() - started)
-            rate = completed / elapsed
-            eta_seconds = (total - completed) / rate if rate else 0
+            rate = completed_count / elapsed
+            eta_seconds = (total - completed_count) / rate if rate else 0
             spf_counts = "/".join(str(counts.get(f"spf_{status}", 0)) for status in ("present_valid", "absent", "present_invalid", "lookup_error"))
             dmarc_counts = "/".join(str(counts.get(f"dmarc_{status}", 0)) for status in ("present_valid", "absent", "present_invalid", "lookup_error"))
             dnssec_counts = "/".join(str(counts.get(f"dnssec_{status}", 0)) for status in ("secure", "unsigned", "broken", "lookup_error", "unknown"))
             dkim_counts = "/".join(str(counts.get(f"dkim_{status}", 0)) for status in ("found", "no_match", "incomplete"))
+            outside_count = sum(1 for row in normalized if row and row.get("rank_status") == "outside_top_1m")
+            web_valid = sum(1 for row in normalized if row and (row.get("web") or {}).get("tls", {}).get("status") == "valid")
             print(
-                f"Progress {completed}/{total} ({completed / total:.0%}) · {domain} · "
+                f"Progress {completed_count}/{total} ({completed_count / total:.0%}) · {completed_domain} · "
                 f"{rate:.2f} domains/s · elapsed {elapsed / 60:.1f}m · ETA {eta_seconds / 60:.1f}m · "
+                f"outside top-1M {outside_count} · valid HTTPS certs {web_valid} · "
                 f"SPF valid/absent/invalid/error {spf_counts} · "
                 f"DMARC valid/absent/invalid/error {dmarc_counts} · "
                 f"DNSSEC secure/unsigned/broken/error/unknown {dnssec_counts} · "
                 f"DKIM found/no-match/incomplete {dkim_counts}",
                 flush=True,
             )
-        if delay_seconds > 0 and completed < total:
-            time.sleep(delay_seconds)
-    return normalized, raw_records
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=DOMAIN_WORKERS_PER_SHARD) as executor:
+        pending: dict[concurrent.futures.Future[tuple[dict[str, Any], dict[str, Any]]], int] = {}
+        next_index = 0
+        last_submit = 0.0
+        while next_index < total or pending:
+            while next_index < total and len(pending) < DOMAIN_WORKERS_PER_SHARD:
+                if delay_seconds > 0 and last_submit:
+                    pause = delay_seconds - (time.monotonic() - last_submit)
+                    if pause > 0:
+                        time.sleep(pause)
+                future = executor.submit(collect_one, next_index, entries[next_index])
+                pending[future] = next_index
+                next_index += 1
+                last_submit = time.monotonic()
+            if not pending:
+                continue
+            done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                index = pending.pop(future)
+                try:
+                    normalized[index], raw_records[index] = future.result()
+                except Exception as error:
+                    entry = entries[index]
+                    domain = normalize_domain(str(entry["domain"]))
+                    rank = int(entry["rank"]) if entry.get("rank") is not None else None
+                    message = f"{type(error).__name__}: {error}"
+                    normalized[index] = normalize_domain_result(
+                        domain, rank, {}, provider_catalog=provider_catalog,
+                        collection_error=message, rank_metadata=entry,
+                    )
+                    raw_records[index] = {
+                        "rank": rank,
+                        "rank_status": normalized[index]["rank_status"],
+                        "au_rank": normalized[index]["au_rank"],
+                        "au_rank_total": normalized[index]["au_rank_total"],
+                        "last_rank": normalized[index]["last_rank"],
+                        "last_au_rank": normalized[index]["last_au_rank"],
+                        "domain": domain,
+                        "raw": {},
+                        "collection_error": message,
+                    }
+                report_progress(str(entries[index]["domain"]))
+    return [row for row in normalized if row is not None], [row for row in raw_records if row is not None]
 
 
 def publish_snapshot(
@@ -1034,7 +1317,7 @@ def publish_snapshot(
     generated_at: dt.datetime,
     collection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not domains or len(domains) != au_entry_count or len(raw_records) != len(domains):
+    if not domains or au_entry_count < 0 or len(raw_records) != len(domains):
         raise ScanError("Refusing to publish an incomplete or empty merged scan")
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=dt.timezone.utc)
@@ -1059,7 +1342,7 @@ def publish_snapshot(
 
     raw_path = raw_dir / f"{snapshot_id}.jsonl.gz"
     with gzip.open(raw_path, "wt", encoding="utf-8", newline="\n") as archive:
-        for record in sorted(raw_records, key=lambda item: int(item["rank"])):
+        for record in sorted(raw_records, key=_domain_sort_key):
             archive.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
     relative_path = f"snapshots/{snapshot_path.name}"
@@ -1074,6 +1357,7 @@ def publish_snapshot(
             "rank_limit": rank_limit,
             "ranked_entry_count": ranked_entry_count,
             "au_entry_count": au_entry_count,
+            "tracked_domain_count": len(domains),
         },
         "checker": {
             "name": "checkdmarc",
@@ -1084,7 +1368,7 @@ def publish_snapshot(
         "collection": json_safe(collection or {}),
         "raw_archive": raw_relative_path,
         "summary": summary,
-        "domains": sorted(domains, key=lambda item: int(item["rank"])),
+        "domains": sorted(domains, key=_domain_sort_key),
     }
     snapshot_path.write_text(
         json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n",
@@ -1108,6 +1392,22 @@ def publish_snapshot(
     return snapshot
 
 
+def _domain_sort_key(item: Mapping[str, Any]) -> tuple[int, int, str]:
+    domain = normalize_domain(str(item.get("domain") or ""))
+    rank = item.get("rank")
+    if rank is not None:
+        try:
+            return (0, int(rank), domain)
+        except (TypeError, ValueError):
+            pass
+    last_rank = item.get("last_rank")
+    try:
+        last_rank_value = int(last_rank) if last_rank is not None else 2_000_000
+    except (TypeError, ValueError):
+        last_rank_value = 2_000_000
+    return (1, last_rank_value, domain)
+
+
 def write_snapshot(
     output_dir: Path,
     list_id: str,
@@ -1119,10 +1419,23 @@ def write_snapshot(
     delay_seconds: float = DOMAIN_DELAY_SECONDS,
 ) -> dict[str, Any]:
     generated_at = generated_at or dt.datetime.now(dt.timezone.utc)
-    au_entries = [entry for entry in ranked_domains if is_au_domain(str(entry["domain"]))]
+    ranked = sorted(ranked_domains, key=lambda item: int(item["rank"]))
+    au_entries = [entry for entry in ranked if is_au_domain(str(entry["domain"]))]
     if not au_entries:
         raise ScanError("The ranked source list yielded no .au entries; refusing to publish an empty snapshot")
-    domains, raw_records = _scan_entries(au_entries, checker, provider_catalog, delay_seconds)
+    prepared = []
+    for au_rank, entry in enumerate(au_entries, start=1):
+        rank = int(entry["rank"])
+        prepared.append({
+            **entry,
+            "rank_status": "in_top_1m",
+            "rank_display": f"#{rank:,}",
+            "au_rank": au_rank,
+            "au_rank_total": len(au_entries),
+            "last_rank": rank,
+            "last_au_rank": au_rank,
+        })
+    domains, raw_records = _scan_entries(prepared, checker, provider_catalog, delay_seconds)
     return publish_snapshot(
         output_dir,
         list_id,
@@ -1137,7 +1450,7 @@ def write_snapshot(
 
 
 def check_domain(domain: str) -> Any:
-    """Run a DNS-only email posture check. SMTP probing is disabled."""
+    """Run the email-authentication and DNS portions of collection. SMTP probing is disabled."""
     try:
         import checkdmarc
     except ImportError as error:

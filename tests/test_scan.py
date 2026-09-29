@@ -10,6 +10,7 @@ from collector.scan import (
     _dnssec_mx_diagnostics,
     effective_spf_terminal,
     infer_provider_clues,
+    infer_web_provider_clues,
     is_au_domain,
     normalize_domain_result,
     parse_ranked_csv,
@@ -113,6 +114,20 @@ class StatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(clues["inbound"][0]["name"], "Google Workspace")
         self.assertEqual(clues["reporting"][0]["name"], "dmarcian")
 
+    def test_web_provider_hints_retain_dns_and_header_evidence(self):
+        clues = infer_web_provider_clues(
+            {"cname": {"status": "present", "records": ["edge.cloudflare.net."]}},
+            {"headers": {"server": "cloudflare", "x-powered-by": "nginx"}},
+            {"providers": [
+                {"name": "Cloudflare", "web_hosts": ["cloudflare.net"], "web_headers": [{"name": "server", "contains": "cloudflare"}]},
+                {"name": "nginx", "web_headers": [{"name": "x-powered-by", "contains": "nginx"}]},
+            ]},
+        )
+        by_name = {item["name"]: item for item in clues}
+        self.assertEqual(by_name["Cloudflare"]["observed_hosts"], ["edge.cloudflare.net"])
+        self.assertEqual(by_name["Cloudflare"]["observed_headers"][0]["name"], "server")
+        self.assertEqual(by_name["nginx"]["observed_headers"][0]["value"], "nginx")
+
     def test_normalized_domain_has_effective_dmarc_source_and_signals(self):
         result = normalize_domain_result(
             "mail.example.com.au",
@@ -161,6 +176,19 @@ class StatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(result["provider_clues"]["inbound"][0]["name"], "Google Workspace")
         self.assertEqual(result["provider_clues"]["reporting"][0]["name"], "dmarcian")
         self.assertEqual(result["dnssec"]["status"], "secure")
+
+    def test_normalization_preserves_roster_rank_metadata(self):
+        result = normalize_domain_result(
+            "old.example.au", None, {}, rank_metadata={
+                "rank_status": "outside_top_1m", "rank_display": ">1,000,000",
+                "au_rank_total": 400, "last_rank": 94321, "last_au_rank": 900,
+                "last_rank_list_id": "ABCD1", "last_ranked_at": "2026-09-01T00:00:00Z",
+            },
+        )
+        self.assertIsNone(result["rank"])
+        self.assertEqual(result["rank_display"], ">1,000,000")
+        self.assertEqual(result["last_rank"], 94321)
+        self.assertEqual(result["last_rank_list_id"], "ABCD1")
 
     def test_dmarc_policies_are_preserved(self):
         for policy in ("none", "quarantine", "reject"):
@@ -313,12 +341,16 @@ class SnapshotTests(unittest.TestCase):
     def test_merge_requires_every_shard_and_keeps_latest_retry_attempt(self):
         prepared = {
             "generated_at": "2026-09-28T00:00:00Z",
-            "source": {"list_id": "ABCD1", "rank_limit": 2, "ranked_entry_count": 2},
+            "source": {"list_id": "ABCD1", "rank_limit": 2, "ranked_entry_count": 2, "au_entry_count": 2, "tracked_domain_count": 2},
             "shard_size": 1,
             "shard_count": 2,
+            "registry": {"schema_version": 1, "domains": {
+                "one.example.au": {"domain": "one.example.au", "last_rank": 1},
+                "two.example.au": {"domain": "two.example.au", "last_rank": 2},
+            }},
             "domains": [
-                {"rank": 1, "domain": "one.example.au"},
-                {"rank": 2, "domain": "two.example.au"},
+                {"rank": 1, "rank_status": "in_top_1m", "rank_display": "#1", "au_rank": 1, "au_rank_total": 2, "last_rank": 1, "last_au_rank": 1, "domain": "one.example.au"},
+                {"rank": 2, "rank_status": "in_top_1m", "rank_display": "#2", "au_rank": 2, "au_rank_total": 2, "last_rank": 2, "last_au_rank": 2, "domain": "two.example.au"},
             ],
         }
         sample_rows = []
@@ -328,9 +360,12 @@ class SnapshotTests(unittest.TestCase):
                 entry["rank"],
                 {"spf": {"record": None, "valid": False, "error": "SPF record does not exist"}},
                 provider_catalog=PROVIDERS,
+                rank_metadata=entry,
             )
             sample_rows.append({
                 "rank": entry["rank"],
+                "rank_status": entry["rank_status"],
+                "au_rank": entry["au_rank"],
                 "domain": entry["domain"],
                 "normalized": normalized,
                 "raw": {"checkdmarc": {"spf": {"record": None}}},
@@ -354,6 +389,7 @@ class SnapshotTests(unittest.TestCase):
             snapshot = merge_scan(input_path, shard_dir, output)
             self.assertEqual([row["rank"] for row in snapshot["domains"]], [1, 2])
             self.assertTrue((output / snapshot["raw_archive"]).exists())
+            self.assertTrue((output / "registry.json").exists())
 
             (shard_dir / "shard-1-attempt-1.jsonl.gz").unlink()
             with self.assertRaisesRegex(RuntimeError, "missing shard outputs"):
