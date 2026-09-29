@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import datetime as dt
 import email.utils
+import base64
 import hashlib
 import html.parser
 import http.client
 import ipaddress
+import json
 import re
 import socket
 import ssl
 import time
 from collections.abc import Callable, Mapping
 from urllib.parse import urljoin, urlsplit, urlunsplit
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 
 
 HTTP_TIMEOUT_SECONDS = 5.0
@@ -247,31 +252,101 @@ def _read_bounded_body(
     return body[:limit], truncated
 
 
+def _certificate_metadata(der: bytes, now: dt.datetime | None = None) -> tuple[dict[str, object], float]:
+    certificate = x509.load_der_x509_certificate(der)
+    not_before = certificate.not_valid_before_utc
+    not_after = certificate.not_valid_after_utc
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    days_until_expiry = round((not_after - now.astimezone(dt.timezone.utc)).total_seconds() / 86400, 2)
+    try:
+        general_names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        subject_alt_names = [
+            {
+                "type": type(name).__name__,
+                "value": name.value.hex() if isinstance(name, x509.OtherName) else str(name.value),
+            }
+            for name in general_names
+        ]
+    except x509.ExtensionNotFound:
+        subject_alt_names = []
+    metadata = {
+        "sha256_fingerprint": certificate.fingerprint(hashes.SHA256()).hex(),
+        "subject": certificate.subject.rfc4514_string(),
+        "issuer": certificate.issuer.rfc4514_string(),
+        "subject_alt_names": subject_alt_names,
+        "not_before": not_before.isoformat().replace("+00:00", "Z"),
+        "not_after": not_after.isoformat().replace("+00:00", "Z"),
+    }
+    return metadata, days_until_expiry
+
+
 def _tls_metadata(connection: http.client.HTTPSConnection | ssl.SSLSocket) -> dict[str, object] | None:
     sock = connection if isinstance(connection, ssl.SSLSocket) else connection.sock
     if sock is None:
         return None
     try:
-        certificate = sock.getpeercert()
         der = sock.getpeercert(binary_form=True)
-        if not certificate or not der:
+        if not der:
             return None
-        not_before = ssl.cert_time_to_seconds(certificate.get("notBefore", ""))
-        not_after = ssl.cert_time_to_seconds(certificate.get("notAfter", ""))
+        certificate, days_until_expiry = _certificate_metadata(der)
         return {
             "status": "valid",
-            "subject": certificate.get("subject", []),
-            "issuer": certificate.get("issuer", []),
-            "subject_alt_names": [list(item) for item in certificate.get("subjectAltName", [])],
-            "not_before": dt.datetime.fromtimestamp(not_before, dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-            "not_after": dt.datetime.fromtimestamp(not_after, dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-            "sha256_fingerprint": hashlib.sha256(der).hexdigest(),
+            "certificate": certificate,
+            "days_until_expiry_at_scan": days_until_expiry,
             "protocol": sock.version(),
             "cipher": sock.cipher(),
             "alpn": sock.selected_alpn_protocol(),
         }
-    except (OSError, ValueError, ssl.SSLError):
+    except (OSError, ValueError, ssl.SSLError, x509.DuplicateExtension, x509.UnsupportedGeneralNameType):
         return None
+
+
+def _diagnostic_tls_metadata(
+    hostname: str,
+    address: str,
+    port: int,
+    deadline: float,
+    validation_status: str,
+) -> dict[str, object] | None:
+    """Read a peer leaf certificate after validation failed; send no HTTP request."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    raw = None
+    tls_sock = None
+    try:
+        raw = socket.create_connection((address, port), timeout=remaining)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.set_alpn_protocols(["http/1.1"])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        raw.settimeout(remaining)
+        tls_sock = context.wrap_socket(raw, server_hostname=hostname)
+        der = tls_sock.getpeercert(binary_form=True)
+        if not der:
+            return None
+        certificate, days_until_expiry = _certificate_metadata(der)
+        return {
+            "status": validation_status,
+            "certificate": certificate,
+            "days_until_expiry_at_scan": days_until_expiry,
+            "protocol": tls_sock.version(),
+            "cipher": tls_sock.cipher(),
+            "alpn": tls_sock.selected_alpn_protocol(),
+            "diagnostic_handshake": True,
+        }
+    except (OSError, ValueError, ssl.SSLError, x509.DuplicateExtension, x509.UnsupportedGeneralNameType):
+        return None
+    finally:
+        if tls_sock is not None:
+            tls_sock.close()
+        elif raw is not None:
+            raw.close()
 
 
 def _request_once(
@@ -341,7 +416,10 @@ def _request_once(
         except Exception as error:
             state = _exception_state(error)
             errors.append(f"{state}: {type(error).__name__}: {error}")
-            if state.startswith("certificate_") or state == "tls_error":
+            if state.startswith("certificate_"):
+                diagnostic = _diagnostic_tls_metadata(hostname, address, port, deadline, state) if scheme == "https" else None
+                return ({"url": url, "state": state, "error": errors[-1], "tls": diagnostic}, b"", state)
+            if state == "tls_error":
                 return ({"url": url, "state": state, "error": errors[-1]}, b"", state)
         finally:
             conn.close()
@@ -366,14 +444,17 @@ def request_chain(
     for redirect_number in range(max_redirects + 1):
         hop, body, error_state = _request_once(current, method, deadline, body_limit, address_resolver)
         if "status_code" not in hop:
-            return {
+            result = {
                 "method": method,
                 "url": url,
                 "final_url": current,
                 "state": str(hop.get("state") or error_state or "lookup_error"),
                 "error": hop.get("error"),
                 "hops": hops,
-            }, b""
+            }
+            if isinstance(hop.get("tls"), Mapping):
+                result["tls"] = hop["tls"]
+            return result, b""
         hops.append(hop)
         code = int(hop["status_code"])
         location = hop.get("location")
@@ -538,8 +619,59 @@ def assess_security_headers(headers: Mapping[str, object], hsts: Mapping[str, ob
     return findings
 
 
+def _externalize_certificate_metadata(web: dict[str, object], security_resources: list[dict[str, object]]) -> tuple[dict[str, dict[str, object]], list[dict[str, object]]]:
+    certificate_objects: dict[str, dict[str, object]] = {}
+    observations: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def collect(tls_value: object) -> None:
+        if not isinstance(tls_value, dict):
+            return
+        certificate = tls_value.pop("certificate", None)
+        if isinstance(certificate, Mapping):
+            fingerprint = str(certificate.get("sha256_fingerprint") or "").lower()
+            if fingerprint:
+                existing = certificate_objects.get(fingerprint)
+                metadata = dict(certificate)
+                if existing is not None and existing != metadata:
+                    raise ValueError(f"Conflicting certificate metadata for SHA-256 fingerprint {fingerprint}")
+                certificate_objects[fingerprint] = metadata
+                tls_value["sha256_fingerprint"] = fingerprint
+        fingerprint = tls_value.get("sha256_fingerprint")
+        if not isinstance(fingerprint, str):
+            return
+        observation = {
+            key: tls_value[key]
+            for key in (
+                "status", "sha256_fingerprint", "days_until_expiry_at_scan",
+                "protocol", "cipher", "alpn", "diagnostic_handshake",
+            )
+            if key in tls_value
+        }
+        identity = json.dumps(observation, sort_keys=True, separators=(",", ":"))
+        if identity not in seen:
+            observations.append(observation)
+            seen.add(identity)
+
+    for scheme in ("http", "https"):
+        request_group = web.get(scheme)
+        if not isinstance(request_group, Mapping):
+            continue
+        for method in ("head", "get"):
+            result = request_group.get(method)
+            if not isinstance(result, Mapping):
+                continue
+            collect(result.get("tls"))
+            for hop in result.get("hops", []) or []:
+                if isinstance(hop, Mapping):
+                    collect(hop.get("tls"))
+    for resource in security_resources:
+        collect(resource.get("tls"))
+    return certificate_objects, observations
+
+
 def probe_web(domain: str, address_resolver=_resolve_public_addresses) -> dict[str, object]:
-    """Probe homepage HEAD/GET and both security.txt locations on each scheme."""
+    """Probe homepages and only the well-known security.txt path on each scheme."""
     domain = domain.strip().rstrip(".").lower()
     web: dict[str, object] = {"http": {}, "https": {}}
     for scheme in ("http", "https"):
@@ -555,24 +687,33 @@ def probe_web(domain: str, address_resolver=_resolve_public_addresses) -> dict[s
             web[scheme]["page"] = {"title": None, "meta_refresh_targets": []}
 
     security_resources: list[dict[str, object]] = []
+    security_txt_objects: dict[str, str] = {}
     for scheme in ("http", "https"):
-        for path in ("/.well-known/security.txt", "/security.txt"):
-            result, body = request_chain(
-                f"{scheme}://{domain}{path}",
-                "GET",
-                MAX_SECURITY_TXT_BYTES,
-                address_resolver=address_resolver,
-            )
-            resource = {**result, "scheme": scheme, "path": path}
-            if result.get("state") == "response" and isinstance(result.get("status_code"), int) and 200 <= int(result["status_code"]) < 300:
-                try:
-                    resource["raw_text"] = body.decode("utf-8")
-                    resource["encoding_valid"] = True
-                except UnicodeDecodeError:
-                    resource["raw_text"] = body.decode("utf-8", errors="replace")
-                    resource["encoding_valid"] = False
-            security_resources.append(resource)
+        path = "/.well-known/security.txt"
+        result, body = request_chain(
+            f"{scheme}://{domain}{path}",
+            "GET",
+            MAX_SECURITY_TXT_BYTES,
+            address_resolver=address_resolver,
+        )
+        resource = {**result, "scheme": scheme, "path": path}
+        if result.get("state") == "response" and isinstance(result.get("status_code"), int) and 200 <= int(result["status_code"]) < 300:
+            fingerprint = hashlib.sha256(body).hexdigest()
+            resource["sha256"] = fingerprint
+            security_txt_objects[fingerprint] = base64.b64encode(body).decode("ascii")
+            try:
+                resource["raw_text"] = body.decode("utf-8")
+                resource["encoding_valid"] = True
+            except UnicodeDecodeError:
+                resource["raw_text"] = body.decode("utf-8", errors="replace")
+                resource["encoding_valid"] = False
+        security_resources.append(resource)
     security_txt = validate_security_txt(domain, security_resources)
+    for resource in security_txt.get("resources", []):
+        if isinstance(resource, dict):
+            resource.pop("raw_text", None)
+    security_txt.pop("raw_text", None)
+    certificate_objects, certificate_observations = _externalize_certificate_metadata(web, security_resources)
 
     hsts = _hsts_observation(web)
     http_get = web["http"].get("get", {})
@@ -596,13 +737,7 @@ def probe_web(domain: str, address_resolver=_resolve_public_addresses) -> dict[s
         str(result.get("state")) for result in (web["https"].get("head", {}), https_get)
         if isinstance(result, Mapping) and result.get("state") not in {None, "response"}
     ]
-    certificates = []
-    for result in (web["https"].get("head", {}), https_get):
-        if isinstance(result, Mapping):
-            for hop in result.get("hops", []) or []:
-                if isinstance(hop, Mapping) and isinstance(hop.get("tls"), Mapping):
-                    certificates.append(hop["tls"])
-    if certificates:
+    if any(item.get("status") == "valid" for item in certificate_observations):
         certificate_status = "valid"
     elif cert_states:
         certificate_status = cert_states[0]
@@ -629,7 +764,7 @@ def probe_web(domain: str, address_resolver=_resolve_public_addresses) -> dict[s
         "headers_source": header_source,
         "header_presence": header_presence,
         "header_findings": assess_security_headers(headers, hsts, cookies),
-        "tls": {"status": certificate_status, "certificates": certificates, "errors": cert_states},
+        "tls": {"status": certificate_status, "certificates": certificate_observations, "errors": cert_states},
         "https_upgrade": {
             "http_redirect_targets": redirect_targets,
             "redirects_to_https": redirect_to_https,
@@ -639,6 +774,8 @@ def probe_web(domain: str, address_resolver=_resolve_public_addresses) -> dict[s
             "hsts": hsts,
         },
         "security_txt": security_txt,
+        "security_txt_objects": security_txt_objects,
+        "certificate_objects": certificate_objects,
     }
 
 
@@ -705,7 +842,7 @@ def validate_security_txt(
     resources: list[Mapping[str, object]],
     now: dt.datetime | None = None,
 ) -> dict[str, object]:
-    """Classify security.txt with separate location, transport, syntax, and lookup evidence."""
+    """Classify the well-known security.txt location and validate any observed body."""
     parsed_resources: list[dict[str, object]] = []
     for resource in resources:
         record = dict(resource)
@@ -753,10 +890,7 @@ def validate_security_txt(
             errors.append("security.txt is not valid UTF-8")
         if record.get("body_truncated"):
             errors.append(f"security.txt exceeds the {MAX_SECURITY_TXT_BYTES}-byte collection limit")
-        path = str(record.get("path") or "")
-        well_known = path == "/.well-known/security.txt"
-        if not well_known:
-            warnings.append("Legacy /security.txt location; use /.well-known/security.txt")
+        well_known = str(record.get("path") or "") == "/.well-known/security.txt"
         final_host = urlsplit(str(record.get("final_url") or "")).hostname or ""
         if final_host.lower().rstrip(".") != domain.lower().rstrip("."):
             warnings.append(f"Redirected to another host: {final_host}")
@@ -781,40 +915,40 @@ def validate_security_txt(
 
     relevant = [
         row for row in parsed_resources
-        if row.get("scheme") == "https" and row.get("path") == "/.well-known/security.txt" and row.get("presence") == "present"
-    ]
-    if not relevant:
-        relevant = [
-            row for row in parsed_resources
-            if row.get("scheme") == "https" and row.get("path") == "/security.txt" and row.get("presence") == "present"
-        ]
-    if not relevant:
-        relevant = [row for row in parsed_resources if row.get("presence") == "present"]
+        if row.get("scheme") == "https" and row.get("presence") == "present"
+    ] or [row for row in parsed_resources if row.get("presence") == "present"]
     preferred = relevant[0] if relevant else None
     if preferred:
         validation = preferred.get("validation")
         validation = validation if isinstance(validation, Mapping) else {}
-        preferred_path = preferred.get("path")
         if validation.get("valid"):
-            status = "valid" if preferred_path == "/.well-known/security.txt" else "valid_legacy"
+            validity_status = "valid"
         elif validation.get("expired"):
-            status = "expired"
+            validity_status = "expired"
         elif preferred.get("scheme") != "https":
-            status = "insecure_transport"
+            validity_status = "insecure_transport"
         else:
-            status = "invalid"
+            validity_status = "invalid"
     elif any(row.get("presence") == "lookup_error" for row in parsed_resources):
-        status = "lookup_error"
+        validity_status = "lookup_error"
     else:
-        status = "absent"
+        validity_status = "absent"
+    if any(row.get("presence") == "present" for row in parsed_resources):
+        finding = "present"
+    elif any(row.get("presence") == "lookup_error" for row in parsed_resources):
+        finding = "lookup_error"
+    else:
+        finding = "absent"
     texts = [
         str(row.get("raw_text")) for row in parsed_resources
         if row.get("presence") == "present" and row.get("raw_text") is not None
     ]
     return {
-        "status": status,
+        "status": finding,
+        "validity_status": validity_status,
         "preferred_path": preferred.get("path") if preferred else None,
         "preferred_scheme": preferred.get("scheme") if preferred else None,
+        "sha256": preferred.get("sha256") if preferred else None,
         "resources": parsed_resources,
         "raw_text": preferred.get("raw_text") if preferred else None,
         "duplicate_content_differs": len(set(texts)) > 1,

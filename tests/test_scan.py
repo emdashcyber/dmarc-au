@@ -14,8 +14,8 @@ from collector.scan import (
     is_au_domain,
     normalize_domain_result,
     parse_ranked_csv,
-    probe_dkim_selectors,
     probe_dnssec,
+    field_size_report,
     snapshot_summary,
     write_snapshot,
 )
@@ -275,22 +275,6 @@ class StatusAndNormalizationTests(unittest.TestCase):
         host_states = {host["hostname"]: host["dnssec_status"] for host in result["mx"]["hosts"]}
         self.assertEqual(host_states, {"mx1.example.au": "lookup_error", "mx2.example.au": "unsigned"})
 
-    def test_common_dkim_probe_marks_found_and_incomplete_separately(self):
-        found = probe_dkim_selectors(
-            "example.au",
-            query=lambda name, kind: ["v=DKIM1; p=public-key"] if name.startswith("s1.") else [],
-            selectors=("s1", "s2"),
-        )
-        failed = probe_dkim_selectors(
-            "example.au",
-            query=lambda name, kind: (_ for _ in ()).throw(TimeoutError("DNS query timed out")),
-            selectors=("s1",),
-        )
-        self.assertEqual(found["selectors"][0]["status"], "found")
-        self.assertEqual(found["selectors"][1]["status"], "absent")
-        self.assertEqual(failed["selectors"][0]["status"], "lookup_error")
-
-
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_history_is_timestamped_and_summary_is_counted(self):
         ranked = [
@@ -337,6 +321,104 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["domains"][0]["spf"]["status"], "lookup_error")
         self.assertEqual(snapshot["domains"][0]["dmarc"]["status"], "lookup_error")
         self.assertEqual(snapshot["summary"]["spf"]["lookup_error"], 1)
+
+    def test_evidence_objects_are_deduplicated_and_raw_rows_keep_only_references(self):
+        import base64
+        import hashlib
+
+        security_body = b"Contact: mailto:security@example.au\nExpires: 2027-09-29T00:00:00Z\n"
+        security_hash = hashlib.sha256(security_body).hexdigest()
+        certificate_hash = "a" * 64
+        certificate_metadata = {
+            "sha256_fingerprint": certificate_hash,
+            "subject": "CN=example.au",
+            "issuer": "CN=CA",
+            "subject_alt_names": [{"type": "DNSName", "value": "example.au"}],
+            "not_before": "2026-01-01T00:00:00Z",
+            "not_after": "2027-01-01T00:00:00Z",
+        }
+        def checker(_domain):
+            return {
+                "checkdmarc": {"spf": {"record": "v=spf1 -all", "valid": True, "parsed": {"all": "fail"}}},
+                "web": {
+                    "security_txt": {
+                        "status": "present", "validity_status": "valid", "sha256": security_hash,
+                        "preferred_scheme": "https", "resources": [{"path": "/.well-known/security.txt", "sha256": security_hash}],
+                    },
+                    "tls": {"status": "valid", "certificates": [{"status": "valid", "sha256_fingerprint": certificate_hash, "days_until_expiry_at_scan": 94.0}]},
+                    "security_txt_objects": {security_hash: base64.b64encode(security_body).decode("ascii")},
+                    "certificate_objects": {certificate_hash: certificate_metadata},
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            snapshot = write_snapshot(
+                output,
+                "ABC12",
+                2,
+                [{"rank": 1, "domain": "one.example.au"}, {"rank": 2, "domain": "two.example.au"}],
+                checker,
+                PROVIDERS,
+                dt.datetime(2026, 9, 29, tzinfo=dt.timezone.utc),
+                0,
+            )
+            self.assertEqual((output / "security-txt" / f"{security_hash}.txt").read_bytes(), security_body)
+            self.assertEqual(json.loads((output / "certificates" / f"{certificate_hash}.json").read_text()), certificate_metadata)
+            self.assertEqual(len(list((output / "security-txt").glob("*.txt"))), 1)
+            self.assertEqual(len(list((output / "certificates").glob("*.json"))), 1)
+            self.assertEqual(snapshot["domains"][0]["security_txt"]["sha256"], security_hash)
+            self.assertEqual(snapshot["domains"][0]["web"]["tls"]["certificates"][0]["sha256_fingerprint"], certificate_hash)
+            self.assertNotIn("security_txt_objects", snapshot["domains"][0]["web"])
+            with gzip.open(output / snapshot["raw_archive"], "rt", encoding="utf-8") as stream:
+                raw_text = stream.read()
+            self.assertNotIn("security_txt_objects", raw_text)
+            self.assertNotIn("certificate_objects", raw_text)
+            self.assertNotIn(base64.b64encode(security_body).decode("ascii"), raw_text)
+            self.assertNotIn(security_body.decode("ascii"), raw_text)
+            self.assertNotIn("CN=example.au", raw_text)
+            self.assertIn(security_hash, raw_text)
+            self.assertIn(certificate_hash, raw_text)
+
+    def test_per_field_size_report_includes_normalized_and_raw_fields(self):
+        report = field_size_report(
+            {"generated_at": "now", "domains": [{"spf": {"record": "x"}, "web": {"title": "y"}}]},
+            [{"raw": {"spf": "x"}, "domain": "example.au"}],
+        )
+        self.assertIn("domains.spf", report)
+        self.assertIn("domains.web", report)
+        self.assertIn("raw.raw", report)
+        self.assertGreater(report["domains.spf"]["serialized_bytes"], 0)
+        self.assertGreater(report["raw.raw"]["gzip_bytes"], 0)
+
+    def test_changed_security_txt_body_is_retained_as_a_new_hash_object(self):
+        import base64
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            for index, body in enumerate((b"Contact: mailto:a@example.au\n", b"Contact: mailto:b@example.au\n"), start=1):
+                digest = hashlib.sha256(body).hexdigest()
+                def checker(_domain):
+                    return {
+                        "web": {
+                            "security_txt": {"status": "present", "validity_status": "invalid", "sha256": digest, "resources": [{"sha256": digest}]},
+                            "security_txt_objects": {digest: base64.b64encode(body).decode("ascii")},
+                        },
+                    }
+                write_snapshot(
+                    output,
+                    f"ABC1{index}",
+                    1,
+                    [{"rank": 1, "domain": "example.au"}],
+                    checker,
+                    PROVIDERS,
+                    dt.datetime(2026, 10, index, tzinfo=dt.timezone.utc),
+                    0,
+                )
+            hashes = {hashlib.sha256(path.read_bytes()).hexdigest() for path in (output / "security-txt").glob("*.txt")}
+            self.assertEqual(len(hashes), 2)
+            self.assertEqual(len(list((output / "security-txt").glob("*.txt"))), 2)
 
     def test_merge_requires_every_shard_and_keeps_latest_retry_attempt(self):
         prepared = {

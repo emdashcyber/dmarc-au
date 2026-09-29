@@ -1,7 +1,8 @@
 (() => {
   "use strict";
 
-  const DATA_INDEX_URL = new URL("./data/index.json", document.baseURI);
+  const DATA_BASE_URL = new URL("./data/", document.baseURI);
+  const DATA_INDEX_URL = new URL("index.json", DATA_BASE_URL);
   const PAGE_SIZE = 25;
   const state = {
     index: null,
@@ -12,6 +13,7 @@
     page: 1,
     hasData: false,
     rawArchive: null,
+    certificateCache: new Map(),
   };
 
   const byId = (id) => document.getElementById(id);
@@ -45,7 +47,6 @@
       absent: ["Absent", "dim"],
       lookup_error: ["Lookup error", "warn"],
       valid: ["Valid", "good"],
-      valid_legacy: ["Valid · legacy path", "warn"],
       expired: ["Expired", "bad"],
       invalid: ["Invalid", "bad"],
       insecure_transport: ["HTTP only", "warn"],
@@ -90,7 +91,6 @@
     result.dmarc_policies = {};
     result.dnssec = { secure: 0, unsigned: 0, broken: 0, lookup_error: 0, unknown: 0 };
     result.mx_dnssec = { secure: 0, unsigned: 0, broken: 0, lookup_error: 0, unknown: 0 };
-    result.dkim = { found: 0, no_match: 0, incomplete: 0 };
     for (const domain of domains) {
       const outcome = domain.spf && domain.spf.terminal && domain.spf.terminal.outcome;
       if (outcome) result.spf_qualifiers[outcome] = (result.spf_qualifiers[outcome] || 0) + 1;
@@ -102,8 +102,6 @@
         const hostStatus = host && host.dnssec_status;
         if (Object.hasOwn(result.mx_dnssec, hostStatus)) result.mx_dnssec[hostStatus] += 1;
       }
-      const dkimStatus = domain.dkim && domain.dkim.status;
-      if (Object.hasOwn(result.dkim, dkimStatus)) result.dkim[dkimStatus] += 1;
     }
     return result;
   }
@@ -129,7 +127,7 @@
     const enforcement = policyCount(summary, "reject") + policyCount(summary, "quarantine");
     const hardFail = Number(summary.spf_qualifiers && summary.spf_qualifiers.fail || 0);
     const webTls = summary.web_tls || {};
-    const securityTxt = summary.security_txt || {};
+    const securityTxt = summary.security_txt_validity || {};
     const webDns = summary.web_dns || {};
     const effectiveCaa = webDns.caa_effective || {};
     const upgrades = summary.https_upgrade || {};
@@ -140,7 +138,7 @@
       { label: "Enforcement policy", value: count(enforcement), percent: ratio(enforcement, total), foot: "p=reject or p=quarantine", className: "good" },
       { label: "SPF hard fail", value: count(hardFail), percent: ratio(hardFail, total), foot: "effective -all ending" },
       { label: "Valid HTTPS", value: count(webTls.valid), percent: ratio(webTls.valid, total), foot: "certificate verified at scan time", className: "good" },
-      { label: "Valid security.txt", value: count(Number(securityTxt.valid || 0) + Number(securityTxt.valid_legacy || 0)), foot: "required fields, expiry, UTF-8, HTTPS" },
+      { label: "Valid security.txt", value: count(securityTxt.valid), foot: "required fields, expiry, UTF-8, HTTPS" },
       { label: "Effective CAA", value: count(effectiveCaa.present), foot: "direct or inherited from an ancestor" },
       { label: "Active HSTS", value: count(upgrades.hsts_active), foot: `${count(headers["content-security-policy"])} also publish CSP` },
     ];
@@ -188,11 +186,7 @@
     const summary = summaryOf(snapshot);
     const dnssec = summary.dnssec || {};
     const mxDnssec = summary.mx_dnssec || {};
-    const dkim = summary.dkim || {};
     const rows = [
-      { label: "DKIM selector match", value: Number(dkim.found || 0), tone: "reject" },
-      { label: "DKIM no common match", value: Number(dkim.no_match || 0), tone: "missing" },
-      { label: "DKIM lookup incomplete", value: Number(dkim.incomplete || 0), tone: "quarantine" },
       { label: "DNSSEC secure", value: Number(dnssec.secure || 0), tone: "reject" },
       { label: "DNSSEC unsigned", value: Number(dnssec.unsigned || 0), tone: "none" },
       { label: "DNSSEC broken / error", value: Number(dnssec.broken || 0) + Number(dnssec.lookup_error || 0), tone: "missing" },
@@ -211,7 +205,7 @@
       row.append(track, el("span", "bar-value", count(item.value)));
       target.append(row);
     }
-    target.setAttribute("aria-label", "DNSSEC chain states and common DKIM selector probe counts");
+    target.setAttribute("aria-label", "DNSSEC chain states and MX target DNSSEC findings");
   }
 
   function drawHistoryChart() {
@@ -262,8 +256,7 @@
       const summary = item.summary || {};
       const total = Number(item.domain_count || summary.domain_count || 0);
       const tls = Number(summary.web_tls && summary.web_tls.valid || 0);
-      const security = Number(summary.security_txt && summary.security_txt.valid || 0)
-        + Number(summary.security_txt && summary.security_txt.valid_legacy || 0);
+      const security = Number(summary.security_txt_validity && summary.security_txt_validity.valid || 0);
       const hsts = Number(summary.https_upgrade && summary.https_upgrade.hsts_active || 0);
       const caa = Number(summary.web_dns && summary.web_dns.caa_effective && summary.web_dns.caa_effective.present || 0);
       const point = el("div", "history-point history-point-pair");
@@ -359,9 +352,8 @@
     }
     fields.push(...safeArray(domain.spf && domain.spf.service_targets));
     for (const host of safeArray(domain.mx && domain.mx.hosts)) fields.push(host && host.hostname);
-    for (const selector of safeArray(domain.dkim && domain.dkim.selectors)) {
-      if (selector) fields.push(selector.selector, ...safeArray(selector.records));
-    }
+    const securityTxt = domain.security_txt || {};
+    fields.push(securityTxt.sha256, securityTxt.validity_status);
     fields.push(...safeArray(domain.runtime_diagnostics));
     return fields.filter(Boolean).join(" ").toLowerCase();
   }
@@ -373,10 +365,10 @@
     const dmarcPolicy = byId("dmarc-filter").value;
     const provider = byId("provider-filter").value;
     const dnssecState = byId("dnssec-filter").value;
-    const dkimState = byId("dkim-filter").value;
     const rankState = byId("rank-filter").value;
     const httpsState = byId("https-filter").value;
     const securityTxtState = byId("securitytxt-filter").value;
+    const securityTxtValidity = byId("securitytxt-validity-filter").value;
     const hstsState = byId("hsts-filter").value;
     const caaState = byId("caa-filter").value;
     const ipv6State = byId("ipv6-filter").value;
@@ -404,10 +396,10 @@
       if (!hasProvider) return false;
     }
     if (dnssecState !== "all" && (!domain.dnssec || domain.dnssec.status !== dnssecState)) return false;
-    if (dkimState !== "all" && (!domain.dkim || domain.dkim.status !== dkimState)) return false;
     if (rankState !== "all" && (domain.rank_status || "in_top_1m") !== rankState) return false;
     if (httpsState !== "all" && (!domain.web || !domain.web.tls || domain.web.tls.status !== httpsState)) return false;
     if (securityTxtState !== "all" && (!domain.security_txt || domain.security_txt.status !== securityTxtState)) return false;
+    if (securityTxtValidity !== "all" && (!domain.security_txt || domain.security_txt.validity_status !== securityTxtValidity)) return false;
     const hsts = domain.web && domain.web.https_upgrade && domain.web.https_upgrade.hsts;
     if (hstsState === "active" && !(hsts && hsts.active)) return false;
     if (hstsState === "inactive" && (hsts && hsts.active)) return false;
@@ -480,7 +472,10 @@
     const cell = el("div", "posture-cell");
     const securityTxt = domain.security_txt || {};
     cell.append(makePill(securityTxt.status || "not_collected"));
-    if (securityTxt.preferred_path) cell.append(el("div", "domain-meta", securityTxt.preferred_path));
+    if (securityTxt.validity_status && securityTxt.validity_status !== "absent") {
+      cell.append(el("div", "domain-meta", `Validity: ${securityTxt.validity_status.replaceAll("_", " ")}`));
+    }
+    if (securityTxt.sha256) cell.append(el("div", "domain-meta hash-ref", `SHA-256 ${securityTxt.sha256.slice(0, 12)}…`));
     return cell;
   }
 
@@ -514,14 +509,6 @@
     if (mxIssues) wrapper.append(el("span", "extra-chip bad", `MX DNSSEC issue ×${mxIssues}`));
     const mxUnsigned = safeArray(domain.mx && domain.mx.hosts).filter((host) => host && host.dnssec_status === "unsigned").length;
     if (mxUnsigned) wrapper.append(el("span", "extra-chip warn", `MX targets unsigned ×${mxUnsigned}`));
-    const dkim = domain.dkim || {};
-    if (dkim.status === "found") {
-      wrapper.append(el("span", "extra-chip good", `DKIM ${safeArray(dkim.found_selectors).length} selector matches`));
-    } else if (dkim.status === "incomplete") {
-      wrapper.append(el("span", "extra-chip", "DKIM probe incomplete"));
-    } else {
-      wrapper.append(el("span", "extra-chip", "No common DKIM match"));
-    }
     for (const [key, label] of [["mta_sts", "MTA-STS"], ["tls_reporting", "TLS-RPT"]]) {
       const value = domain[key] || {};
       if (value.status === "present_valid") wrapper.append(el("span", "extra-chip good", label));
@@ -571,8 +558,35 @@
       https: web.requests && web.requests.https,
     }, true);
     appendDetailBlock(content, "HTTPS upgrade evidence", web.https_upgrade || {});
-    appendDetailBlock(content, "TLS certificate and negotiated connection", web.tls || {});
+    appendDetailBlock(content, "TLS connection observations", web.tls || {});
+    const certificateBlock = el("section", "detail-block wide");
+    certificateBlock.append(el("h4", "", "Deduplicated leaf certificate metadata"));
+    const certificateMetadata = el("pre", "", "Open this row to load referenced certificate metadata.");
+    certificateBlock.append(certificateMetadata);
+    content.append(certificateBlock);
+    row.certificateMetadataTarget = certificateMetadata;
     appendDetailBlock(content, "security.txt resources and validation", domain.security_txt || {}, true);
+    const securityResources = safeArray(domain.security_txt && domain.security_txt.resources);
+    const securityHashes = new Map();
+    for (const resource of securityResources) {
+      const hash = resource && resource.sha256;
+      if (typeof hash === "string" && /^[0-9a-f]{64}$/i.test(hash)) securityHashes.set(hash.toLowerCase(), resource);
+    }
+    if (securityHashes.size) {
+      const evidenceBlock = el("section", "detail-block wide");
+      evidenceBlock.append(el("h4", "", "Stored security.txt evidence"));
+      const evidenceList = el("div", "evidence-list");
+      for (const [hash, resource] of securityHashes) {
+        const scheme = String(resource.scheme || "").toUpperCase();
+        const link = el("a", "evidence-link", `${scheme || "Response"} · ${hash.slice(0, 16)}…`);
+        link.href = new URL(`security-txt/${hash}.txt`, DATA_BASE_URL).href;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        evidenceList.append(link);
+      }
+      evidenceBlock.append(evidenceList);
+      content.append(evidenceBlock);
+    }
     appendDetailBlock(content, "Selected HTTPS headers and observations", {
       headers: web.headers,
       header_presence: web.header_presence,
@@ -604,7 +618,6 @@
       mta_sts: domain.mta_sts,
       tls_reporting: domain.tls_reporting,
       dnssec: domain.dnssec,
-      dkim: domain.dkim,
       runtime_diagnostics: domain.runtime_diagnostics,
       nameservers: domain.nameservers,
       soa: domain.soa,
@@ -615,6 +628,33 @@
     cell.append(content);
     row.append(cell);
     return row;
+  }
+
+  async function loadCertificateMetadata(domain, target) {
+    const observations = safeArray(domain.web && domain.web.tls && domain.web.tls.certificates);
+    const fingerprints = [...new Set(observations.map((item) => item && item.sha256_fingerprint)
+      .filter((value) => typeof value === "string" && /^[0-9a-f]{64}$/i.test(value)))];
+    if (!fingerprints.length) {
+      target.textContent = "No peer certificate metadata was captured.";
+      return;
+    }
+    const results = await Promise.all(fingerprints.map(async (fingerprint) => {
+      const normalized = fingerprint.toLowerCase();
+      if (!state.certificateCache.has(normalized)) {
+        const request = fetch(new URL(`certificates/${normalized}.json`, DATA_BASE_URL), { cache: "force-cache" })
+          .then((response) => {
+            if (!response.ok) throw new Error(`Certificate object request failed (${response.status})`);
+            return response.json();
+          })
+          .catch((error) => {
+            state.certificateCache.delete(normalized);
+            throw error;
+          });
+        state.certificateCache.set(normalized, request);
+      }
+      return { fingerprint: normalized, metadata: await state.certificateCache.get(normalized) };
+    }));
+    target.textContent = JSON.stringify({ observations, certificates: results }, null, 2);
   }
 
   function createDomainRows(domains) {
@@ -668,6 +708,13 @@
         details.hidden = !details.hidden;
         detailButton.setAttribute("aria-expanded", String(!details.hidden));
         detailButton.textContent = details.hidden ? "Inspect posture" : "Hide details";
+        if (!details.hidden && details.dataset.certificatesLoaded !== "true") {
+          details.dataset.certificatesLoaded = "true";
+          loadCertificateMetadata(domain, details.certificateMetadataTarget).catch((error) => {
+            details.certificateMetadataTarget.textContent = `Unable to load certificate metadata: ${error.message}`;
+            details.dataset.certificatesLoaded = "false";
+          });
+        }
       });
       fragment.append(row, details);
     }
@@ -716,7 +763,7 @@
     const response = await fetch(new URL(entry.path, DATA_INDEX_URL), { cache: "no-cache" });
     if (!response.ok) throw new Error(`Snapshot request failed (${response.status})`);
     const snapshot = await response.json();
-    if (snapshot.schema_version !== 3) throw new Error(`Unsupported snapshot schema ${snapshot.schema_version}`);
+    if (snapshot.schema_version !== 4) throw new Error(`Unsupported snapshot schema ${snapshot.schema_version}`);
     if (!Array.isArray(snapshot.domains)) throw new Error("Snapshot is missing its domain list");
     state.snapshot = snapshot;
     state.rawArchive = snapshot.raw_archive || entry.raw_archive || null;
@@ -748,7 +795,7 @@
       const response = await fetch(DATA_INDEX_URL, { cache: "no-cache" });
       if (!response.ok) throw new Error(`Index request failed (${response.status})`);
       state.index = await response.json();
-      if (state.index.schema_version !== 3) throw new Error(`Unsupported data index schema ${state.index.schema_version}`);
+      if (state.index.schema_version !== 4) throw new Error(`Unsupported data index schema ${state.index.schema_version}`);
       drawHistoryChart();
       fillSnapshotSelector();
       const snapshots = safeArray(state.index.snapshots).slice().sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at));
@@ -806,9 +853,9 @@
       "spf_status", "spf_valid", "spf_record", "spf_terminal", "spf_dns_lookups", "spf_void_lookups", "spf_mechanisms", "spf_services",
       "dmarc_status", "dmarc_valid", "dmarc_record", "dmarc_location", "dmarc_source", "dmarc_policy_p", "dmarc_policy_sp", "dmarc_policy_np", "dmarc_alignment", "dmarc_test_mode", "dmarc_reporting_uris",
       "outbound_services", "inbound_services", "reporting_services", "web_services", "web_service_evidence",
-      "mx_hosts", "mta_sts_status", "tls_reporting_status", "dnssec_status", "dnssec_evidence", "mx_dnssec_evidence", "dkim_status", "dkim_found_selectors", "nameservers", "soa",
+      "mx_hosts", "mta_sts_status", "tls_reporting_status", "dnssec_status", "dnssec_evidence", "mx_dnssec_evidence", "nameservers", "soa",
       "page_title", "http_head", "http_get", "https_head", "https_get", "https_upgrade", "tls_status", "tls_certificates",
-      "security_txt_status", "security_txt_preferred_path", "security_txt_preferred_scheme", "security_txt_validation", "security_txt_text",
+      "security_txt_status", "security_txt_validity_status", "security_txt_sha256", "security_txt_preferred_scheme", "security_txt_resources",
       "security_headers_source", "security_headers", "security_header_presence", "security_header_findings", "web_dns_a", "web_dns_aaaa", "web_dns_cname", "web_dns_https", "caa_direct", "caa_effective", "errors",
     ];
     const rows = [headers];
@@ -819,7 +866,6 @@
       const securityProviders = safeArray(domain.web_provider_clues);
       const web = domain.web || {};
       const securityTxt = domain.security_txt || {};
-      const preferredResource = safeArray(securityTxt.resources).find((item) => item.path === securityTxt.preferred_path && item.scheme === securityTxt.preferred_scheme);
       const dns = domain.web_dns || {};
       const terminal = domain.spf && domain.spf.terminal;
       rows.push([
@@ -842,7 +888,6 @@
         domain.mta_sts && domain.mta_sts.status, domain.tls_reporting && domain.tls_reporting.status,
         domain.dnssec && domain.dnssec.status, serialize(domain.dnssec),
         serialize(safeArray(domain.mx && domain.mx.hosts).map((host) => ({ hostname: host.hostname, status: host.dnssec_status, evidence: host.dnssec_evidence }))),
-        domain.dkim && domain.dkim.status, safeArray(domain.dkim && domain.dkim.found_selectors).join("; "),
         safeArray(domain.nameservers && domain.nameservers.nameservers || domain.nameservers).join("; "), serialize(domain.soa),
         web.page && web.page.title,
         serialize(web.requests && web.requests.http && web.requests.http.head),
@@ -850,8 +895,8 @@
         serialize(web.requests && web.requests.https && web.requests.https.head),
         serialize(web.requests && web.requests.https && web.requests.https.get),
         serialize(web.https_upgrade), web.tls && web.tls.status, serialize(web.tls && web.tls.certificates),
-        securityTxt.status, securityTxt.preferred_path, securityTxt.preferred_scheme,
-        serialize(preferredResource && preferredResource.validation), preferredResource ? preferredResource.raw_text : securityTxt.raw_text,
+        securityTxt.status, securityTxt.validity_status, securityTxt.sha256, securityTxt.preferred_scheme,
+        serialize(securityTxt.resources),
         web.headers_source, serialize(web.headers), serialize(web.header_presence), serialize(web.header_findings),
         serialize(dns.a), serialize(dns.aaaa), serialize(dns.cname), serialize(dns.https),
         serialize(dns.caa && dns.caa.direct), serialize(dns.caa && dns.caa.effective), serialize(domain.errors),
@@ -881,7 +926,7 @@
 
   for (const id of [
     "search-input", "rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter",
-    "provider-filter", "dnssec-filter", "dkim-filter", "https-filter", "securitytxt-filter",
+    "provider-filter", "dnssec-filter", "https-filter", "securitytxt-filter", "securitytxt-validity-filter",
     "hsts-filter", "caa-filter", "ipv6-filter", "web-dns-filter", "header-filter",
   ]) {
     byId(id).addEventListener(id === "search-input" ? "input" : "change", () => {

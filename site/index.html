@@ -111,13 +111,13 @@
           <article class="chart-card signals-card">
             <div class="chart-heading">
               <div>
-                <p class="chart-kicker">DNSSEC + DKIM</p>
-                <h3>Chain states and selector probes</h3>
+                <p class="chart-kicker">DNSSEC</p>
+                <h3>DNSSEC chain states</h3>
               </div>
               <span class="chart-unit">domains / MX hosts</span>
             </div>
-            <div id="signals-chart" class="bar-chart" role="img" aria-label="DNSSEC states and DKIM selector probe results"></div>
-            <p class="chart-caption">DKIM checks cover common selectors only; no match is not proof that DKIM is absent.</p>
+            <div id="signals-chart" class="bar-chart" role="img" aria-label="DNSSEC chain states and MX target DNSSEC findings"></div>
+            <p class="chart-caption">Domain and MX DNSSEC observations are reported independently.</p>
           </article>
         </div>
       </section>
@@ -200,15 +200,6 @@
             </select>
           </div>
           <div class="filter-select">
-            <label for="dkim-filter">Common DKIM selectors</label>
-            <select id="dkim-filter">
-              <option value="all">Any result</option>
-              <option value="found">Match found</option>
-              <option value="no_match">No common match</option>
-              <option value="incomplete">Lookup incomplete</option>
-            </select>
-          </div>
-          <div class="filter-select">
             <label for="https-filter">HTTPS certificate</label>
             <select id="https-filter">
               <option value="all">Any state</option>
@@ -229,13 +220,21 @@
             <label for="securitytxt-filter">security.txt</label>
             <select id="securitytxt-filter">
               <option value="all">Any state</option>
-              <option value="valid">Valid</option>
-              <option value="valid_legacy">Valid · legacy path</option>
-              <option value="expired">Expired</option>
-              <option value="invalid">Invalid</option>
-              <option value="insecure_transport">HTTP only</option>
+              <option value="present">Present</option>
               <option value="absent">Absent</option>
               <option value="lookup_error">Lookup error</option>
+            </select>
+          </div>
+          <div class="filter-select">
+            <label for="securitytxt-validity-filter">security.txt validity</label>
+            <select id="securitytxt-validity-filter">
+              <option value="all">Any validity</option>
+              <option value="valid">Valid</option>
+              <option value="expired">Expired</option>
+              <option value="invalid">Invalid</option>
+              <option value="insecure_transport">Insecure transport</option>
+              <option value="lookup_error">Lookup error</option>
+              <option value="absent">No file found</option>
             </select>
           </div>
           <div class="filter-select">
@@ -336,7 +335,7 @@
           <p class="eyebrow">HOW TO READ THIS DATA</p>
           <h2 id="method-title">Published signals describe configuration at scan time.</h2>
           <p>
-            SPF and DMARC show published email policies. Website headers, TLS certificate details, HTTPS redirects, and security.txt are sampled with bounded public GET and HEAD requests. DNSSEC distinguishes secure, unsigned, broken, and lookup-error results. DKIM checks common selectors only, so no match is inconclusive. Provider names are clues inferred from published hostnames and headers.
+            SPF and DMARC show published email policies. Website headers, TLS certificate details, HTTPS redirects, and the well-known security.txt path are sampled with bounded public GET and HEAD requests. Security evidence files are content-addressed and snapshots reference their SHA-256 hashes. DNSSEC distinguishes secure, unsigned, broken, and lookup-error results. Provider names are clues inferred from published hostnames and headers.
           </p>
         </div>
         <div class="method-links">

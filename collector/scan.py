@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import csv
 import datetime as dt
 import gzip
+import hashlib
 import io
 import json
 import logging
@@ -18,6 +20,7 @@ import urllib.error
 import urllib.request
 import warnings
 import zipfile
+import zlib
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -26,27 +29,10 @@ from typing import Any, Callable
 from collector.web_checks import cached_address_resolver, probe_web, probe_web_dns
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SHARD_SIZE = 200
 PROGRESS_INTERVAL = 25
 DOMAIN_WORKERS_PER_SHARD = 4
-DKIM_SELECTORS = (
-    "default",
-    "dkim",
-    "mail",
-    "selector",
-    "selector1",
-    "selector2",
-    "google",
-    "google1",
-    "google2",
-    "s1",
-    "s2",
-    "k1",
-    "zoho",
-    "mandrill",
-)
-DKIM_QUERY_WORKERS = 4
 TRANCO_TOP_ID_URL = "https://tranco-list.eu/top-1m-id"
 TRANCO_DOWNLOAD_URL = "https://tranco-list.eu/download/{list_id}/{limit}"
 USER_AGENT = "au-mail-auth-observatory/1.0"
@@ -777,28 +763,6 @@ def normalize_domain_result(
         "mx_hosts": mx_dnssec_evidence,
     }
 
-    dkim_evidence = auxiliary.get("dkim") if isinstance(auxiliary, Mapping) else None
-    dkim_evidence = dkim_evidence if isinstance(dkim_evidence, Mapping) else {}
-    dkim_results = dkim_evidence.get("selectors")
-    dkim_results = dkim_results if isinstance(dkim_results, list) else []
-    found_selectors = [
-        str(item.get("selector"))
-        for item in dkim_results
-        if isinstance(item, Mapping) and item.get("status") == "found"
-    ]
-    dkim_errors = [
-        item for item in dkim_results
-        if isinstance(item, Mapping) and item.get("status") == "lookup_error"
-    ]
-    dkim_status = "found" if found_selectors else "incomplete" if dkim_errors else "no_match"
-    dkim_data = {
-        "status": dkim_status,
-        "probe_scope": "common_selectors_only",
-        "selectors_checked": len(dkim_results),
-        "found_selectors": found_selectors,
-        "selectors": dkim_results,
-    }
-
     nameservers = result.get("ns")
     soa = result.get("soa")
     raw_web = auxiliary.get("web") if isinstance(auxiliary.get("web"), Mapping) else {}
@@ -828,6 +792,9 @@ def normalize_domain_result(
         "header_presence": {},
         "security_txt": {"status": "not_collected", "resources": []},
     }
+    security_txt_data = json_safe(web.get("security_txt") or {"status": "not_collected", "resources": []})
+    for transient_key in ("security_txt_objects", "certificate_objects", "security_txt"):
+        web.pop(transient_key, None)
     web_dns = auxiliary.get("web_dns") if isinstance(auxiliary.get("web_dns"), Mapping) else None
     if web_dns is None:
         web_dns = {
@@ -855,7 +822,6 @@ def normalize_domain_result(
         "mta_sts": extra_signal(mta_sts),
         "tls_reporting": extra_signal(tls_report),
         "dnssec": dnssec_data,
-        "dkim": dkim_data,
         "runtime_diagnostics": auxiliary.get("runtime_diagnostics", []) if isinstance(auxiliary, Mapping) else [],
         "nameservers": json_safe(nameservers),
         "soa": json_safe(soa),
@@ -863,7 +829,7 @@ def normalize_domain_result(
         "web": json_safe(web),
         "web_dns": json_safe(web_dns),
         "web_provider_clues": json_safe(web_provider_clues),
-        "security_txt": json_safe(web.get("security_txt") or {"status": "not_collected", "resources": []}),
+        "security_txt": security_txt_data,
         "errors": errors,
     }
 
@@ -873,6 +839,7 @@ def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
     rank_counts = {"in_top_1m": 0, "outside_top_1m": 0}
     tls_counts: dict[str, int] = {}
     security_txt_counts: dict[str, int] = {}
+    security_txt_validity_counts: dict[str, int] = {}
     web_dns_counts: dict[str, dict[str, int]] = {
         key: {"present": 0, "absent": 0, "lookup_error": 0, "not_collected": 0}
         for key in ("a", "aaaa", "cname", "https", "caa_direct", "caa_effective")
@@ -890,6 +857,8 @@ def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
         security_txt = domain.get("security_txt") if isinstance(domain.get("security_txt"), Mapping) else {}
         security_status = str(security_txt.get("status") or "unknown")
         security_txt_counts[security_status] = security_txt_counts.get(security_status, 0) + 1
+        validity_status = str(security_txt.get("validity_status") or "unknown")
+        security_txt_validity_counts[validity_status] = security_txt_validity_counts.get(validity_status, 0) + 1
         presence = web.get("header_presence") if isinstance(web.get("header_presence"), Mapping) else {}
         for header, found in presence.items():
             if found:
@@ -921,6 +890,7 @@ def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
     summary["rank_status"] = rank_counts
     summary["web_tls"] = tls_counts
     summary["security_txt"] = security_txt_counts
+    summary["security_txt_validity"] = security_txt_validity_counts
     summary["web_dns"] = web_dns_counts
     summary["security_headers"] = header_counts
     summary["web_provider_clues"] = web_provider_counts
@@ -954,8 +924,6 @@ def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
 
     dnssec_counts = {key: 0 for key in ("secure", "unsigned", "broken", "lookup_error", "unknown")}
     mx_dnssec_counts = {key: 0 for key in ("secure", "unsigned", "broken", "lookup_error", "unknown")}
-    dkim_counts = {key: 0 for key in ("found", "no_match", "incomplete")}
-    dkim_selector_counts: dict[str, int] = {}
     for domain in domains:
         dnssec = domain.get("dnssec")
         if isinstance(dnssec, Mapping) and dnssec.get("status") in dnssec_counts:
@@ -965,17 +933,8 @@ def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
             for host in mx.get("hosts", []) or []:
                 if isinstance(host, Mapping) and host.get("dnssec_status") in mx_dnssec_counts:
                     mx_dnssec_counts[str(host["dnssec_status"])] += 1
-        dkim = domain.get("dkim")
-        if isinstance(dkim, Mapping) and dkim.get("status") in dkim_counts:
-            dkim_counts[str(dkim["status"])] += 1
-        if isinstance(dkim, Mapping):
-            for selector in dkim.get("found_selectors", []) or []:
-                key = str(selector)
-                dkim_selector_counts[key] = dkim_selector_counts.get(key, 0) + 1
     summary["dnssec"] = dnssec_counts
     summary["mx_dnssec"] = mx_dnssec_counts
-    summary["dkim"] = dkim_counts
-    summary["dkim_selectors"] = dkim_selector_counts
     return summary
 
 
@@ -1005,6 +964,161 @@ def load_index(path: Path) -> dict[str, Any]:
     if not all(isinstance(item, dict) for item in value["snapshots"]):
         raise ScanError("Existing snapshot index contains an invalid entry; preserving it")
     return value
+
+
+def _extract_evidence_objects(raw_records: list[dict[str, Any]]) -> tuple[dict[str, bytes], dict[str, dict[str, Any]]]:
+    security_txt_objects: dict[str, bytes] = {}
+    certificate_objects: dict[str, dict[str, Any]] = {}
+    for record in raw_records:
+        raw = record.get("raw")
+        web = raw.get("web") if isinstance(raw, Mapping) else None
+        if not isinstance(web, dict):
+            continue
+        encoded_objects = web.pop("security_txt_objects", {})
+        if isinstance(encoded_objects, Mapping):
+            for fingerprint, encoded in encoded_objects.items():
+                key = str(fingerprint).lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", key) or not isinstance(encoded, str):
+                    raise ScanError("Invalid security.txt content-addressed evidence in shard data")
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except ValueError as error:
+                    raise ScanError(f"Invalid base64 security.txt content for {key}") from error
+                if hashlib.sha256(content).hexdigest() != key:
+                    raise ScanError(f"security.txt content hash mismatch for {key}")
+                prior = security_txt_objects.get(key)
+                if prior is not None and prior != content:
+                    raise ScanError(f"Conflicting security.txt content for SHA-256 {key}")
+                security_txt_objects[key] = content
+        embedded_certificates = web.pop("certificate_objects", {})
+        if isinstance(embedded_certificates, Mapping):
+            for fingerprint, metadata in embedded_certificates.items():
+                key = str(fingerprint).lower()
+                if (
+                    not re.fullmatch(r"[0-9a-f]{64}", key)
+                    or not isinstance(metadata, Mapping)
+                    or str(metadata.get("sha256_fingerprint", "")).lower() != key
+                ):
+                    raise ScanError("Invalid certificate content-addressed evidence in shard data")
+                value = json_safe(dict(metadata))
+                prior = certificate_objects.get(key)
+                if prior is not None and prior != value:
+                    raise ScanError(f"Conflicting certificate metadata for SHA-256 {key}")
+                certificate_objects[key] = value
+    return security_txt_objects, certificate_objects
+
+
+def _write_evidence_objects(
+    output_dir: Path,
+    security_txt_objects: Mapping[str, bytes],
+    certificate_objects: Mapping[str, Mapping[str, Any]],
+    domains: list[Mapping[str, Any]],
+) -> None:
+    security_dir = output_dir / "security-txt"
+    certificates_dir = output_dir / "certificates"
+    for fingerprint, content in security_txt_objects.items():
+        if hashlib.sha256(content).hexdigest() != fingerprint:
+            raise ScanError(f"security.txt content hash mismatch for {fingerprint}")
+        path = security_dir / f"{fingerprint}.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.read_bytes() != content:
+            raise ScanError(f"Existing content-addressed security.txt object differs: {path.name}")
+        if not path.exists():
+            path.write_bytes(content)
+    for fingerprint, metadata in certificate_objects.items():
+        if str(metadata.get("sha256_fingerprint", "")).lower() != fingerprint:
+            raise ScanError(f"Certificate metadata fingerprint mismatch for {fingerprint}")
+        path = certificates_dir / f"{fingerprint}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")) + "\n"
+        if path.exists() and path.read_text(encoding="utf-8") != content:
+            try:
+                previous = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as error:
+                raise ScanError(f"Existing certificate object is unreadable: {path.name}") from error
+            if previous != metadata:
+                raise ScanError(f"Existing content-addressed certificate object differs: {path.name}")
+        else:
+            path.write_text(content, encoding="utf-8")
+
+    referenced_security: set[str] = set()
+    referenced_certificates: set[str] = set()
+    for domain in domains:
+        security_txt = domain.get("security_txt")
+        if isinstance(security_txt, Mapping):
+            for resource in security_txt.get("resources", []) or []:
+                if isinstance(resource, Mapping) and resource.get("sha256"):
+                    referenced_security.add(str(resource["sha256"]).lower())
+        web = domain.get("web")
+        tls = web.get("tls") if isinstance(web, Mapping) else None
+        if isinstance(tls, Mapping):
+            for certificate in tls.get("certificates", []) or []:
+                if isinstance(certificate, Mapping) and certificate.get("sha256_fingerprint"):
+                    referenced_certificates.add(str(certificate["sha256_fingerprint"]).lower())
+    for fingerprint in referenced_security:
+        if not (security_dir / f"{fingerprint}.txt").is_file():
+            raise ScanError(f"Missing referenced security.txt object {fingerprint}")
+    for fingerprint in referenced_certificates:
+        if not (certificates_dir / f"{fingerprint}.json").is_file():
+            raise ScanError(f"Missing referenced certificate object {fingerprint}")
+
+
+def field_size_report(
+    value: Mapping[str, Any],
+    raw_records: list[Mapping[str, Any]] | None = None,
+) -> dict[str, dict[str, int]]:
+    """Estimate serialized and gzip sizes per snapshot and per-domain field."""
+    report: dict[str, dict[str, int]] = {}
+    for key, field_value in value.items():
+        if key == "domains" and isinstance(field_value, list):
+            domain_fields = sorted({
+                str(field)
+                for domain in field_value
+                if isinstance(domain, Mapping)
+                for field in domain
+            })
+            for field in domain_fields:
+                report[f"domains.{field}"] = _serialized_size([
+                    domain.get(field) for domain in field_value if isinstance(domain, Mapping)
+                ])
+            continue
+        report[str(key)] = _serialized_size(field_value)
+    if raw_records is not None:
+        raw_fields = sorted({str(field) for record in raw_records for field in record})
+        for field in raw_fields:
+            report[f"raw.{field}"] = _serialized_size([record.get(field) for record in raw_records])
+    return report
+
+
+def _serialized_size(field_value: Any) -> dict[str, int]:
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    compressor = zlib.compressobj(level=9, wbits=31)
+    serialized_bytes = 0
+    gzip_bytes = 0
+    for chunk in encoder.iterencode(field_value):
+        encoded = chunk.encode("utf-8")
+        serialized_bytes += len(encoded)
+        gzip_bytes += len(compressor.compress(encoded))
+    gzip_bytes += len(compressor.flush())
+    return {"serialized_bytes": serialized_bytes, "gzip_bytes": gzip_bytes}
+
+
+def _print_size_report(
+    snapshot: Mapping[str, Any],
+    snapshot_path: Path,
+    raw_path: Path,
+    raw_records: list[Mapping[str, Any]],
+) -> dict[str, dict[str, int]]:
+    report = field_size_report(snapshot, raw_records)
+    print("Snapshot and raw field sizes (serialized / gzip bytes):", flush=True)
+    for field, sizes in sorted(report.items(), key=lambda item: item[1]["serialized_bytes"], reverse=True):
+        print(f"  {field}: {sizes['serialized_bytes']:,} / {sizes['gzip_bytes']:,}", flush=True)
+    print(
+        f"Snapshot files: {snapshot_path.stat().st_size:,} bytes JSON; "
+        f"{raw_path.stat().st_size:,} bytes compressed raw archive",
+        flush=True,
+    )
+    return report
 
 
 def _query_dns(name: str, record_type: str) -> list[str]:
@@ -1084,43 +1198,6 @@ def probe_dnssec(
     return {"status": status, "ds": ds, "dnskey": dnskey, "explanation": explanation}
 
 
-def _probe_dkim_selector(
-    domain: str,
-    selector: str,
-    query: Callable[[str, str], list[str]],
-) -> dict[str, Any]:
-    name = f"{selector}._domainkey.{normalize_domain(domain)}"
-    evidence = _query_evidence(name, "TXT", query)
-    records = evidence["records"]
-    has_dkim_marker = any(re.search(r"(?:^|[;\s])v\s*=\s*DKIM1(?:[;\s]|$)", item, re.IGNORECASE) for item in records)
-    if has_dkim_marker:
-        status = "found"
-    elif evidence["status"] == "lookup_error":
-        status = "lookup_error"
-    elif evidence["status"] == "present":
-        status = "non_dkim_txt"
-    else:
-        status = "absent"
-    return {
-        "selector": selector,
-        "qname": name,
-        "status": status,
-        "records": records,
-        "error": evidence["error"],
-    }
-
-
-def probe_dkim_selectors(
-    domain: str,
-    query: Callable[[str, str], list[str]] = _query_dns,
-    selectors: tuple[str, ...] = DKIM_SELECTORS,
-) -> dict[str, Any]:
-    """Probe a bounded, documented set; this is not exhaustive DKIM discovery."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=DKIM_QUERY_WORKERS) as executor:
-        results = list(executor.map(lambda selector: _probe_dkim_selector(domain, selector, query), selectors))
-    return {"probe_scope": "common_selectors_only", "selectors": results}
-
-
 def collect_domain(domain: str) -> dict[str, Any]:
     """Collect mail, web, TLS, and DNS signals independently for one name."""
     email_error = None
@@ -1143,10 +1220,6 @@ def collect_domain(domain: str) -> dict[str, Any]:
         }
     except Exception as error:
         dnssec_evidence = {"status": "lookup_error", "ds": {}, "dnskey": {}, "mx_hosts": [], "explanation": str(error)}
-    try:
-        dkim_evidence = probe_dkim_selectors(domain)
-    except Exception as error:
-        dkim_evidence = {"probe_scope": "common_selectors_only", "selectors": [{"status": "lookup_error", "error": str(error)}]}
     try:
         web_dns = probe_web_dns(domain)
     except Exception as error:
@@ -1172,7 +1245,6 @@ def collect_domain(domain: str) -> dict[str, Any]:
         "email_collection_error": email_error,
         "runtime_diagnostics": json_safe(runtime_diagnostics),
         "dnssec_evidence": json_safe(dnssec_evidence),
-        "dkim": json_safe(dkim_evidence),
         "web_dns": json_safe(web_dns),
         "web": json_safe(web),
     }
@@ -1238,8 +1310,6 @@ def _scan_entries(
                 counts[key] = counts.get(key, 0) + 1
             dnssec_status = str((row.get("dnssec") or {}).get("status", "unknown"))
             counts[f"dnssec_{dnssec_status}"] = counts.get(f"dnssec_{dnssec_status}", 0) + 1
-            dkim_status = str((row.get("dkim") or {}).get("status", "unknown"))
-            counts[f"dkim_{dkim_status}"] = counts.get(f"dkim_{dkim_status}", 0) + 1
         if completed_count % progress_interval == 0 or completed_count == total:
             elapsed = max(0.001, time.monotonic() - started)
             rate = completed_count / elapsed
@@ -1247,7 +1317,6 @@ def _scan_entries(
             spf_counts = "/".join(str(counts.get(f"spf_{status}", 0)) for status in ("present_valid", "absent", "present_invalid", "lookup_error"))
             dmarc_counts = "/".join(str(counts.get(f"dmarc_{status}", 0)) for status in ("present_valid", "absent", "present_invalid", "lookup_error"))
             dnssec_counts = "/".join(str(counts.get(f"dnssec_{status}", 0)) for status in ("secure", "unsigned", "broken", "lookup_error", "unknown"))
-            dkim_counts = "/".join(str(counts.get(f"dkim_{status}", 0)) for status in ("found", "no_match", "incomplete"))
             outside_count = sum(1 for row in normalized if row and row.get("rank_status") == "outside_top_1m")
             web_valid = sum(1 for row in normalized if row and (row.get("web") or {}).get("tls", {}).get("status") == "valid")
             print(
@@ -1256,8 +1325,7 @@ def _scan_entries(
                 f"outside top-1M {outside_count} · valid HTTPS certs {web_valid} · "
                 f"SPF valid/absent/invalid/error {spf_counts} · "
                 f"DMARC valid/absent/invalid/error {dmarc_counts} · "
-                f"DNSSEC secure/unsigned/broken/error/unknown {dnssec_counts} · "
-                f"DKIM found/no-match/incomplete {dkim_counts}",
+                f"DNSSEC secure/unsigned/broken/error/unknown {dnssec_counts}",
                 flush=True,
             )
 
@@ -1316,6 +1384,8 @@ def publish_snapshot(
     raw_records: list[dict[str, Any]],
     generated_at: dt.datetime,
     collection: Mapping[str, Any] | None = None,
+    security_txt_objects: Mapping[str, bytes] | None = None,
+    certificate_objects: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not domains or au_entry_count < 0 or len(raw_records) != len(domains):
         raise ScanError("Refusing to publish an incomplete or empty merged scan")
@@ -1364,16 +1434,21 @@ def publish_snapshot(
             "version": "6.0.3",
             "dns_library": "dnspython",
             "dns_library_version": "2.8.0",
+            "certificate_library": "cryptography",
+            "certificate_library_version": "50.0.1",
         },
         "collection": json_safe(collection or {}),
         "raw_archive": raw_relative_path,
         "summary": summary,
         "domains": sorted(domains, key=_domain_sort_key),
     }
-    snapshot_path.write_text(
-        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+    with snapshot_path.open("w", encoding="utf-8", newline="\n") as stream:
+        encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+        for chunk in encoder.iterencode(snapshot):
+            stream.write(chunk)
+        stream.write("\n")
+    _write_evidence_objects(output_dir, security_txt_objects or {}, certificate_objects or {}, domains)
+    _print_size_report(snapshot, snapshot_path, raw_path, raw_records)
     entry = {
         "id": snapshot_id,
         "path": relative_path,
@@ -1436,6 +1511,7 @@ def write_snapshot(
             "last_au_rank": au_rank,
         })
     domains, raw_records = _scan_entries(prepared, checker, provider_catalog, delay_seconds)
+    security_txt_objects, certificate_objects = _extract_evidence_objects(raw_records)
     return publish_snapshot(
         output_dir,
         list_id,
@@ -1446,6 +1522,8 @@ def write_snapshot(
         raw_records,
         generated_at,
         {"shard_size": SHARD_SIZE, "parallelism": 1, "delay_seconds": delay_seconds},
+        security_txt_objects,
+        certificate_objects,
     )
 
 

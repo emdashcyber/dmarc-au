@@ -231,6 +231,9 @@ tbody tr.data-row:hover { background: #202d30; }
 .detail-block p { margin: 0 0 5px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .detail-block pre { max-height: 110px; margin: 0; overflow: auto; color: #d6dfdb; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.5 var(--mono); }
 .detail-block.wide { grid-column: 1 / -1; }
+.evidence-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.evidence-link { color: var(--cyan); font: 10px var(--mono); overflow-wrap: anywhere; }
+.hash-ref { font-family: var(--mono); }
 .empty-cell { padding: 32px; color: var(--muted); text-align: center; }
 .empty-state, .error-state { margin-top: 12px; padding: 28px; border: 1px dashed var(--line); border-radius: 5px; color: var(--muted); text-align: center; }
 .empty-state h3 { margin: 8px 0; color: var(--text); }
