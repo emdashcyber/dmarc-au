@@ -1,4 +1,4 @@
-"""Bounded security.txt GETs and compact response observations."""
+"""Bounded root HEAD and security.txt GET observations."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import re
 import socket
 import ssl
 import time
+import unicodedata
 from collections.abc import Callable, Mapping
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -41,6 +42,32 @@ SECURITY_HEADERS = (
     "alt-svc",
 )
 REDIRECT_CODES = {301, 302, 303, 307, 308}
+RFC3339_EXPIRES_RE = re.compile(
+    r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})[Tt]"
+    r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})"
+    r"(?:\.(?P<fraction>\d+))?"
+    r"(?P<zone>[Zz]|(?P<sign>[+-])(?P<offset_hour>\d{2}):(?P<offset_minute>\d{2}))",
+    re.ASCII,
+)
+FIELD_NAME_RE = re.compile(r"[!-9;-~]+", re.ASCII)
+URI_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*\Z", re.ASCII)
+URI_UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+URI_SUBDELIMS = frozenset("!$&'()*+,;=")
+LANGUAGE_GRANDFATHERED = frozenset({
+    "art-lojban", "cel-gaulish", "en-gb-oed", "i-ami", "i-bnn", "i-default",
+    "i-enochian", "i-hak", "i-klingon", "i-lux", "i-mingo", "i-navajo",
+    "i-pwn", "i-tao", "i-tay", "i-tsu", "no-bok", "no-nyn", "sgn-be-fr",
+    "sgn-be-nl", "sgn-ch-de", "zh-guoyu", "zh-hakka", "zh-min", "zh-min-nan",
+    "zh-xiang",
+})
+LEAP_SECOND_DATES = frozenset({
+    "1972-06-30", "1972-12-31", "1973-06-30", "1973-12-31", "1974-12-31",
+    "1975-12-31", "1976-12-31", "1977-12-31", "1978-12-31", "1979-12-31",
+    "1981-06-30", "1982-06-30", "1983-06-30", "1985-06-30", "1987-12-31",
+    "1989-12-31", "1990-12-31", "1992-06-30", "1993-06-30", "1994-06-30",
+    "1995-12-31", "1997-06-30", "1998-12-31", "2005-12-31", "2008-12-31",
+    "2012-06-30", "2015-06-30", "2016-12-31",
+})
 
 
 def _is_global_address(address: str) -> bool:
@@ -189,6 +216,7 @@ def _request_once(
     deadline: float,
     body_limit: int,
     address_resolver: Callable[[str, float], tuple[list[str], str | None]],
+    method: str = "GET",
 ) -> tuple[dict[str, object], bytes]:
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
@@ -238,9 +266,9 @@ def _request_once(
                     raise TimeoutError("Request deadline exceeded after TLS handshake")
                 if conn.sock is not None:
                     conn.sock.settimeout(remaining)
-            conn.request("GET", path, headers={
+            conn.request(method, path, headers={
                 "User-Agent": HTTP_USER_AGENT,
-                "Accept": "text/plain, */*;q=0.5",
+                "Accept": "*/*",
                 "Accept-Encoding": "identity",
             })
             if conn.sock is not None:
@@ -253,7 +281,7 @@ def _request_once(
             body = b""
             body_truncated = False
             body_complete = True
-            if 200 <= response.status < 300:
+            if method != "HEAD" and 200 <= response.status < 300:
                 try:
                     body, body_truncated = _read_bounded_body(response, conn, body_limit, deadline)
                     body_complete = not body_truncated
@@ -302,14 +330,21 @@ def request_chain(
     timeout: float = HTTP_TIMEOUT_SECONDS,
     max_redirects: int = MAX_REDIRECTS,
     address_resolver: Callable[[str, float], tuple[list[str], str | None]] = _resolve_public_addresses,
+    method: str = "GET",
 ) -> tuple[dict[str, object], bytes]:
     """Fetch one URL with a bounded redirect chain and no retained response body."""
+    method = method.upper()
+    if method not in {"GET", "HEAD"}:
+        raise ValueError("Only GET and HEAD requests are supported")
     deadline = time.monotonic() + timeout
     current = url
     hops: list[dict[str, object]] = []
     response_body = b""
     for redirect_number in range(max_redirects + 1):
-        hop, body = _request_once(current, deadline, body_limit, address_resolver)
+        if method == "HEAD":
+            hop, body = _request_once(current, deadline, body_limit, address_resolver, method=method)
+        else:
+            hop, body = _request_once(current, deadline, body_limit, address_resolver)
         hops.append(hop)
         code = hop.get("status_code")
         if not isinstance(code, int):
@@ -393,76 +428,467 @@ def request_chain(
     return {"url": _safe_url(url), "final_url": _safe_url(current), "state": "redirect_limit", "hops": hops}, b""
 
 
+def probe_root_head(
+    domain: str,
+    address_resolver: Callable[[str, float], tuple[list[str], str | None]] = _resolve_public_addresses,
+) -> dict[str, object]:
+    """Observe whether an HTTP HEAD of / redirects into HTTPS and retain selected headers."""
+    domain = domain.strip().rstrip(".").lower()
+    result, _ = request_chain(
+        f"http://{domain}/", body_limit=0, address_resolver=address_resolver, method="HEAD"
+    )
+    hops = [hop for hop in result.get("hops", []) if isinstance(hop, Mapping)]
+    upgrades = any(
+        urlsplit(str(hop.get("url") or "")).scheme.lower() == "http"
+        and urlsplit(str(hop.get("redirect_to") or "")).scheme.lower() == "https"
+        for hop in hops
+    )
+    status_code = result.get("status_code")
+    state = str(result.get("state") or "lookup_error")
+    if upgrades:
+        upgrade_result: bool | None = True
+        upgrade_state = "upgraded"
+    elif state == "response" and status_code not in {405, 501}:
+        upgrade_result = False
+        upgrade_state = "not_upgraded"
+    else:
+        upgrade_result = None
+        upgrade_state = "unknown"
+        if state == "response" and status_code in {405, 501}:
+            state = "head_unsupported"
+
+    return {
+        "method": "HEAD",
+        "path": "/",
+        "state": state,
+        "status_code": status_code if isinstance(status_code, int) else None,
+        "final_url": result.get("final_url"),
+        "upgrades_to_https": upgrade_result,
+        "upgrade_state": upgrade_state,
+        "tls_certificate": result.get("tls_certificate", "not_observed"),
+        "headers": result.get("headers", {}),
+        "hops": [
+            {
+                key: hop.get(key)
+                for key in ("url", "status_code", "redirect_to", "state", "headers", "tls_certificate")
+                if hop.get(key) is not None
+            }
+            for hop in hops
+        ],
+    }
+
+
+def _valid_uri(value: str, *, require_https_for_web: bool = False) -> bool:
+    """Validate the ASCII URI syntax used by RFC 9116 fields."""
+    if not value or any(ord(char) > 0x7E or ord(char) < 0x21 for char in value):
+        return False
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return False
+    try:
+        parts = urlsplit(value)
+        if not URI_SCHEME_RE.fullmatch(parts.scheme):
+            return False
+
+        def component_valid(component: str, extra: str) -> bool:
+            index = 0
+            while index < len(component):
+                char = component[index]
+                if char == "%":
+                    if index + 2 >= len(component) or not re.fullmatch(r"[0-9A-Fa-f]{2}", component[index + 1:index + 3]):
+                        return False
+                    index += 3
+                    continue
+                if char not in URI_UNRESERVED and char not in URI_SUBDELIMS and char not in extra:
+                    return False
+                index += 1
+            return True
+
+        if not component_valid(parts.path, ":/@"):
+            return False
+        if not component_valid(parts.query, ":/@/?") or not component_valid(parts.fragment, ":/@/?"):
+            return False
+
+        scheme = parts.scheme.lower()
+        if parts.netloc:
+            authority = parts.netloc
+            userinfo, separator, host_port = authority.rpartition("@")
+            if separator and ("@" in userinfo or not component_valid(userinfo, ":")):
+                return False
+            if host_port.startswith("["):
+                closing = host_port.find("]")
+                if closing < 0:
+                    return False
+                ip_literal = host_port[1:closing]
+                suffix = host_port[closing + 1:]
+                if suffix and not re.fullmatch(r":\d*", suffix):
+                    return False
+                try:
+                    ipaddress.IPv6Address(ip_literal)
+                except ValueError:
+                    if not re.fullmatch(r"[vV][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+", ip_literal):
+                        return False
+            else:
+                if host_port.count(":") > 1:
+                    return False
+                host, colon, port = host_port.partition(":")
+                if colon and port and not port.isdigit():
+                    return False
+                if not component_valid(host, ""):
+                    return False
+            # Accessing .port validates numeric and in-range ports when the
+            # authority is not an IPvFuture literal.
+            try:
+                if not host_port.startswith("[") or not re.match(r"\[[vV][0-9A-Fa-f]+\.", host_port):
+                    _ = parts.port
+            except ValueError:
+                return False
+        if scheme in {"http", "https", "ftp", "ws", "wss"}:
+            if require_https_for_web and scheme != "https":
+                return False
+            if scheme == "https" and (not parts.netloc or not parts.hostname):
+                return False
+            if scheme == "http" and not parts.hostname:
+                return False
+        if scheme in {"mailto", "tel"} and not parts.path:
+            return False
+    except ValueError:
+        return False
+    return True
+
+
+def _valid_language_tag(value: str) -> bool:
+    """Check RFC 5646 language-tag syntax without needing registry data."""
+    tag = value.lower()
+    if tag in LANGUAGE_GRANDFATHERED:
+        return True
+    parts = tag.split("-")
+    if not parts or any(not part or not part.isascii() or not part.isalnum() for part in parts):
+        return False
+    if parts[0] == "x":
+        return len(parts) > 1 and all(1 <= len(part) <= 8 for part in parts[1:])
+
+    language = parts[0]
+    if not language.isalpha() or not (2 <= len(language) <= 8):
+        return False
+    index = 1
+    if len(language) <= 3:
+        extlangs = 0
+        while index < len(parts) and len(parts[index]) == 3 and parts[index].isalpha() and extlangs < 3:
+            index += 1
+            extlangs += 1
+    if index < len(parts) and len(parts[index]) == 4 and parts[index].isalpha():
+        index += 1
+    if index < len(parts) and (
+        (len(parts[index]) == 2 and parts[index].isalpha())
+        or (len(parts[index]) == 3 and parts[index].isdigit())
+    ):
+        index += 1
+    variants: set[str] = set()
+    while index < len(parts) and (
+        5 <= len(parts[index]) <= 8
+        or (len(parts[index]) == 4 and parts[index][0].isdigit())
+    ):
+        if parts[index] in variants:
+            return False
+        variants.add(parts[index])
+        index += 1
+    extensions: set[str] = set()
+    while index < len(parts) and len(parts[index]) == 1 and parts[index] != "x":
+        singleton = parts[index]
+        if singleton in extensions:
+            return False
+        extensions.add(singleton)
+        index += 1
+        first_subtag = index
+        while index < len(parts) and 2 <= len(parts[index]) <= 8:
+            index += 1
+        if index == first_subtag:
+            return False
+    if index < len(parts) and parts[index] == "x":
+        index += 1
+        first_subtag = index
+        while index < len(parts) and 1 <= len(parts[index]) <= 8:
+            index += 1
+        if index == first_subtag:
+            return False
+    return index == len(parts)
+
+
+def _parse_expires(value: str, now: dt.datetime) -> tuple[bool, str, bool | None]:
+    """Return (syntax_valid, freshness, expired) for an RFC 3339 date-time."""
+    match = RFC3339_EXPIRES_RE.fullmatch(value)
+    if not match:
+        return False, "unknown", None
+    try:
+        year = int(match.group("year"))
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+        hour = int(match.group("hour"))
+        minute = int(match.group("minute"))
+        second = int(match.group("second"))
+        if hour > 23 or minute > 59 or second > 60:
+            return False, "unknown", None
+
+        zone = match.group("zone")
+        if zone.lower() == "z":
+            offset = dt.timedelta(0)
+        else:
+            offset_hour = int(match.group("offset_hour"))
+            offset_minute = int(match.group("offset_minute"))
+            if offset_hour > 23 or offset_minute > 59:
+                return False, "unknown", None
+            offset = dt.timedelta(hours=offset_hour, minutes=offset_minute)
+            if match.group("sign") == "-":
+                offset = -offset
+        timezone = dt.timezone(offset)
+        fraction = match.group("fraction") or ""
+        microseconds = int((fraction[:6] + "000000")[:6]) if fraction else 0
+        submicrosecond_nonzero = any(char != "0" for char in fraction[6:])
+
+        if second == 60:
+            # datetime cannot represent leap seconds. Validate the UTC instant
+            # against announced leap-second dates, then map it to the next
+            # representable instant for freshness comparison.
+            local_base = dt.datetime(year, month, day, hour, minute, 59, tzinfo=timezone)
+            utc_base = local_base.astimezone(dt.timezone.utc)
+            if utc_base.strftime("%Y-%m-%d") not in LEAP_SECOND_DATES or (utc_base.hour, utc_base.minute) != (23, 59):
+                return False, "unknown", None
+            # Collapse the unrepresentable leap-second interval to its next
+            # representable instant; at that boundary the expiry is stale.
+            expiry = utc_base + dt.timedelta(seconds=1)
+        else:
+            expiry = dt.datetime(year, month, day, hour, minute, second, microseconds, tzinfo=timezone).astimezone(dt.timezone.utc)
+    except (OverflowError, ValueError):
+        return False, "unknown", None
+
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    now_utc = now.astimezone(dt.timezone.utc)
+    expired = expiry < now_utc or (expiry == now_utc and not submicrosecond_nonzero)
+    return True, "expired" if expired else "current", expired
+
+
+def _split_security_txt_lines(text: str) -> tuple[list[str] | None, bool, str | None]:
+    """Split only RFC 9116 LF/CRLF lines and enforce parser safety bounds."""
+    if not text.endswith("\n") or re.search(r"\r(?!\n)", text):
+        return None, False, "line_ending_invalid"
+    all_crlf = text.count("\n") == text.count("\r\n")
+    normalized = text.replace("\r\n", "\n")
+    lines = normalized[:-1].split("\n")
+    if len(lines) > 1000 or any(len(line) > 2048 for line in lines):
+        return None, all_crlf, "parser_limit_exceeded"
+    return lines, all_crlf, None
+
+
+def _extract_signed_cleartext(lines: list[str], all_crlf: bool) -> list[str] | None:
+    """Check RFC 9116 clear-signature framing; cryptographic trust is separate."""
+    if not all_crlf or not lines or lines[0] != "-----BEGIN PGP SIGNED MESSAGE-----":
+        return None
+    index = 1
+    hash_count = 0
+    token = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+    while index < len(lines) and lines[index].startswith("Hash: "):
+        hashes = lines[index][6:].split(",")
+        if not hashes or any(not re.fullmatch(token, value) for value in hashes):
+            return None
+        hash_count += 1
+        index += 1
+    if hash_count == 0 or index >= len(lines) or lines[index] != "":
+        return None
+    index += 1
+    try:
+        signature_start = lines.index("-----BEGIN PGP SIGNATURE-----", index)
+    except ValueError:
+        return None
+    cleartext = lines[index:signature_start]
+    for line in cleartext:
+        if line.startswith("- "):
+            # RFC 4880 dash escaping prefixes one additional "- " to lines
+            # that would otherwise be ambiguous in clear-signed text.
+            continue
+        if "\r" in line:
+            return None
+
+    index = signature_start + 1
+    while index < len(lines) and lines[index] != "":
+        if not re.fullmatch(rf"{token}: [\x20-\x7e\t]*", lines[index]):
+            return None
+        index += 1
+    if index >= len(lines) or lines[index] != "":
+        return None
+    index += 1
+    data_count = 0
+    while index < len(lines) and lines[index] != "-----END PGP SIGNATURE-----":
+        if not re.fullmatch(r"[A-Za-z0-9=/+]+", lines[index]):
+            return None
+        data_count += 1
+        index += 1
+    if data_count == 0 or index != len(lines) - 1:
+        return None
+    cleartext = [line[2:] if line.startswith("- ") else line for line in cleartext]
+    return cleartext
+
+
 def _parse_security_txt(text: str, now: dt.datetime | None = None) -> dict[str, object]:
     now = now or dt.datetime.now(dt.timezone.utc)
+    lines, all_crlf, limit_or_line_error = _split_security_txt_lines(text)
+    if lines is None:
+        reason = limit_or_line_error or "line_ending_invalid"
+        return {
+            "contact_present": False, "contact_valid": False,
+            "expires_present": False, "expires_valid": False,
+            "expired": None, "freshness": "unknown", "signature_status": "unknown",
+            "not_assessable": reason == "parser_limit_exceeded", "reasons": [reason],
+        }
+
+    text_without_linebreaks = text.replace("\r", "").replace("\n", "")
+    if text.startswith("\ufeff"):
+        return {
+            "contact_present": False, "contact_valid": False,
+            "expires_present": False, "expires_valid": False,
+            "expired": None, "freshness": "unknown", "signature_status": "not_signed",
+            "not_assessable": False, "reasons": ["utf8_bom"],
+        }
+    if any(
+        (0x80 <= ord(char) <= 0x9F)
+        or ord(char) == 0x7F
+        or (ord(char) < 0x20 and char not in "\t")
+        or char in "\u2028\u2029"
+        or unicodedata.category(char) == "Cn"
+        for char in text_without_linebreaks
+    ):
+        return {
+            "contact_present": False, "contact_valid": False,
+            "expires_present": False, "expires_valid": False,
+            "expired": None, "freshness": "unknown", "signature_status": "not_signed",
+            "not_assessable": False, "reasons": ["net_unicode_invalid"],
+        }
+
+    signature_status = "not_signed"
+    if lines and lines[0] == "-----BEGIN PGP SIGNED MESSAGE-----":
+        cleartext = _extract_signed_cleartext(lines, all_crlf)
+        if cleartext is None:
+            return {
+                "contact_present": False, "contact_valid": False,
+                "expires_present": False, "expires_valid": False,
+                "expired": None, "freshness": "unknown", "signature_status": "invalid",
+                "not_assessable": False, "reasons": ["signed_format_invalid"],
+            }
+        lines = cleartext
+        signature_status = "present_unverified"
+
     fields: dict[str, list[str]] = {}
-    malformed = False
-    for raw_line in text.splitlines():
-        line = raw_line.strip("\r\n")
-        if not line.strip() or line.lstrip().startswith("#"):
+    reasons: list[str] = []
+    for line in lines:
+        if not line.strip(" \t"):
             continue
-        match = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*)", line)
-        if not match:
-            malformed = True
+        if line.startswith("#"):
             continue
-        fields.setdefault(match.group(1).lower(), []).append(match.group(2).strip())
+        match = re.fullmatch(r"([^:]+): (.*)", line)
+        if not match or not FIELD_NAME_RE.fullmatch(match.group(1)):
+            reasons.append("malformed_field")
+            continue
+        name, value = match.group(1).lower(), match.group(2)
+        if not value.strip(" \t"):
+            reasons.append("field_value_missing")
+            continue
+        fields.setdefault(name, []).append(value)
 
     contacts = fields.get("contact", [])
-    contact_valid = bool(contacts)
-    for contact in contacts:
-        parts = urlsplit(contact)
-        if parts.scheme.lower() not in {"mailto", "https"} or not parts.path or (
-            parts.scheme.lower() == "https" and not parts.hostname
-        ):
-            contact_valid = False
-    expires = fields.get("expires", [])
-    expiry_valid = False
-    expired = False
-    if len(expires) == 1:
-        value = expires[0]
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value):
-            try:
-                expiry = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-                expiry_valid = expiry.tzinfo is not None
-                expired = expiry <= now.astimezone(dt.timezone.utc) if expiry_valid else False
-            except ValueError:
-                expiry_valid = False
-
-    reasons: list[str] = []
-    if malformed:
-        reasons.append("malformed_field")
+    contact_valid = bool(contacts) and all(_valid_uri(value, require_https_for_web=True) for value in contacts)
     if not contacts:
         reasons.append("contact_missing")
     elif not contact_valid:
         reasons.append("contact_invalid")
+
+    expires = fields.get("expires", [])
+    expires_valid = False
+    expired: bool | None = None
+    freshness = "unknown"
     if not expires:
         reasons.append("expires_missing")
     elif len(expires) != 1:
         reasons.append("expires_multiple")
-    elif not expiry_valid:
-        reasons.append("expires_malformed")
-    elif expired:
-        reasons.append("expired")
+    else:
+        expires_valid, freshness, expired = _parse_expires(expires[0], now)
+        if not expires_valid:
+            reasons.append("expires_malformed")
+
+    uri_fields_valid = True
+    for field_name in ("acknowledgments", "canonical", "encryption", "hiring", "policy"):
+        for value in fields.get(field_name, []):
+            if not _valid_uri(value, require_https_for_web=True):
+                uri_fields_valid = False
+    if not uri_fields_valid:
+        reasons.append("uri_field_invalid")
+
+    languages = fields.get("preferred-languages", [])
+    languages_valid = True
+    if len(languages) > 1:
+        languages_valid = False
+        reasons.append("preferred_languages_multiple")
+    elif languages:
+        value = languages[0]
+        raw_tags = value.split(",")
+        tags = [item.strip(" \t") for item in raw_tags]
+        if value != value.strip(" \t") or not tags or any(not _valid_language_tag(tag) for tag in tags):
+            languages_valid = False
+            reasons.append("preferred_languages_invalid")
+
     return {
         "contact_present": bool(contacts),
         "contact_valid": contact_valid,
         "expires_present": bool(expires),
-        "expires_valid": expiry_valid and not expired,
+        "expires_valid": expires_valid,
         "expired": expired,
-        "reasons": reasons,
+        "freshness": freshness,
+        "signature_status": signature_status,
+        "not_assessable": False,
+        "uri_fields_valid": uri_fields_valid,
+        "preferred_languages_valid": languages_valid,
+        "utf8_nfc": unicodedata.normalize("NFC", text) == text,
+        "reasons": list(dict.fromkeys(reasons)),
     }
 
 
 def _content_type_valid(headers: Mapping[str, object]) -> bool:
     content_type = str(headers.get("content-type") or "")
-    parts = [part.strip() for part in content_type.split(";")]
+    parts: list[str] = []
+    current: list[str] = []
+    quoted = False
+    escaped = False
+    for char in content_type:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif quoted and char == "\\":
+            current.append(char)
+            escaped = True
+        elif char == '"':
+            current.append(char)
+            quoted = not quoted
+        elif char == ";" and not quoted:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if quoted or escaped:
+        return False
+    parts.append("".join(current).strip())
     if not parts or parts[0].lower() != "text/plain":
         return False
+    charset_values: list[str] = []
+    parameter_re = re.compile(
+        r"([!#$%&'*+.^_`|~0-9A-Za-z-]+)\s*=\s*(?:\"((?:\\.|[^\"\\])*)\"|([!#$%&'*+.^_`|~0-9A-Za-z-]+))\Z"
+    )
     for parameter in parts[1:]:
-        match = re.fullmatch(r"charset\s*=\s*['\"]?([^'\"]+)['\"]?", parameter, re.IGNORECASE)
-        if match and match.group(1).strip().lower() not in {"utf-8", "utf8"}:
+        match = parameter_re.fullmatch(parameter)
+        if not match:
             return False
-    return True
+        if match.group(1).lower() == "charset":
+            charset = match.group(2) if match.group(2) is not None else match.group(3)
+            charset_values.append(re.sub(r"\\(.)", r"\1", charset))
+    return len(charset_values) <= 1 and (not charset_values or charset_values[0].lower() == "utf-8")
 
 
 def _availability(result: Mapping[str, object]) -> str:
@@ -522,12 +948,19 @@ def probe_security_txt(
         "expires_present": None,
         "expires_valid": None,
         "expired": None,
+        "uri_fields_valid": None,
+        "preferred_languages_valid": None,
+        "signature_status": "unknown",
+        "utf8_nfc": None,
         "reasons": [],
     }
     content_validity = "not_assessable"
+    freshness = "unknown"
     if availability == "present":
         if not selected.get("body_complete"):
             validation["reasons"] = ["body_incomplete"]
+        elif len(body) > MAX_SECURITY_TXT_BYTES:
+            validation["reasons"] = ["parser_limit_exceeded"]
         else:
             try:
                 text = body.decode("utf-8")
@@ -543,22 +976,36 @@ def probe_security_txt(
                 "contact_valid": False,
                 "expires_present": False,
                 "expires_valid": False,
-                "expired": False,
+                "expired": None,
+                "freshness": "unknown",
+                "uri_fields_valid": False,
+                "preferred_languages_valid": False,
+                "signature_status": "unknown",
+                "utf8_nfc": None,
+                "not_assessable": False,
                 "reasons": ["utf8_invalid"],
             }
-            for key in ("contact_present", "contact_valid", "expires_present", "expires_valid", "expired"):
+            for key in (
+                "contact_present", "contact_valid", "expires_present", "expires_valid", "expired",
+                "uri_fields_valid", "preferred_languages_valid", "signature_status", "utf8_nfc",
+            ):
                 validation[key] = parsed[key]
+            freshness = str(parsed.get("freshness") or "unknown")
             reasons = list(parsed["reasons"])
             if validation["utf8_valid"] is False:
                 reasons.append("utf8_invalid")
             if validation["content_type_valid"] is False:
                 reasons.append("content_type_invalid")
             validation["reasons"] = list(dict.fromkeys(reasons))
-            content_validity = "valid" if not reasons and validation["content_type_valid"] else "invalid"
+            if parsed.get("not_assessable"):
+                content_validity = "not_assessable"
+            else:
+                content_validity = "valid" if not reasons and validation["content_type_valid"] else "invalid"
 
     compact_attempts: list[dict[str, object]] = []
     redirects_to_https = False
     https_response_received = False
+    cross_host_redirect = False
     for attempt in attempts:
         hops = []
         for hop in attempt.get("hops", []) or []:
@@ -575,6 +1022,12 @@ def probe_security_txt(
             redirects_to_https = redirects_to_https or (
                 isinstance(target, str) and urlsplit(target).scheme.lower() == "https"
             )
+            if isinstance(target, str) and isinstance(hop_url, str):
+                source_host = urlsplit(hop_url).hostname
+                target_host = urlsplit(target).hostname
+                cross_host_redirect = cross_host_redirect or (
+                    bool(source_host and target_host) and source_host.lower() != target_host.lower()
+                )
             compact_hop: dict[str, object] = {
                 "url": hop.get("url"),
                 "status_code": hop.get("status_code"),
@@ -597,10 +1050,12 @@ def probe_security_txt(
     return {
         "availability": availability,
         "content_validity": content_validity,
+        "freshness": freshness,
         "tls_certificate": tls_status,
         "request": {
             "fallback_attempted": fallback_attempted,
             "redirects_to_https": redirects_to_https or any(bool(item.get("redirects_to_https")) for item in attempts),
+            "cross_host_redirect": cross_host_redirect,
             "https_response_received": https_response_received,
             "status_code": selected.get("status_code"),
             "final_url": selected.get("final_url"),

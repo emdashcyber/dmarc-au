@@ -24,7 +24,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from collector.web_checks import probe_security_txt
+from collector.web_checks import probe_root_head, probe_security_txt
 
 
 SCHEMA_VERSION = 5
@@ -713,11 +713,25 @@ def normalize_domain_result(
     nameservers = result.get("ns")
     soa = result.get("soa")
     security_txt = auxiliary.get("security_txt") if isinstance(auxiliary.get("security_txt"), Mapping) else None
+    root_head = auxiliary.get("root_head") if isinstance(auxiliary.get("root_head"), Mapping) else None
+    root_head_data = json_safe(root_head) if root_head else {
+        "method": "HEAD",
+        "path": "/",
+        "state": "not_collected",
+        "status_code": None,
+        "final_url": None,
+        "upgrades_to_https": None,
+        "upgrade_state": "unknown",
+        "tls_certificate": "not_observed",
+        "headers": {},
+        "hops": [],
+    }
     security_txt_data = json_safe(security_txt) if security_txt else {
         "availability": "not_collected",
         "content_validity": "not_assessable",
+        "freshness": "unknown",
         "tls_certificate": "not_observed",
-        "request": {"fallback_attempted": False, "redirects_to_https": False, "attempts": []},
+        "request": {"fallback_attempted": False, "redirects_to_https": False, "cross_host_redirect": False, "attempts": []},
         "validation": {"reasons": []},
     }
 
@@ -758,6 +772,7 @@ def normalize_domain_result(
         "nameservers": json_safe(nameservers),
         "soa": json_safe(soa),
         "provider_clues": providers,
+        "root_head": root_head_data,
         "security_txt": security_txt_data,
         "errors": errors,
     }
@@ -768,21 +783,28 @@ def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
     rank_counts = {"in_top_1m": 0, "outside_top_1m": 0}
     availability_counts = {key: 0 for key in ("present", "absent", "lookup_error", "http_error", "not_collected")}
     content_counts = {key: 0 for key in ("valid", "invalid", "not_assessable")}
+    freshness_counts = {key: 0 for key in ("current", "expired", "unknown")}
     certificate_counts = {key: 0 for key in ("valid", "invalid", "not_observed", "error")}
     header_counts: dict[str, int] = {}
     https_redirect_count = 0
     https_response_count = 0
+    root_upgrade_counts = {key: 0 for key in ("upgraded", "not_upgraded", "unknown")}
+    root_head_hsts_count = 0
+    root_head_header_counts: dict[str, int] = {}
     for domain in domains:
         rank_status = str(domain.get("rank_status") or "in_top_1m")
         rank_counts[rank_status] = rank_counts.get(rank_status, 0) + 1
         security_txt = domain.get("security_txt") if isinstance(domain.get("security_txt"), Mapping) else {}
         availability = str(security_txt.get("availability") or "not_collected")
         content_validity = str(security_txt.get("content_validity") or "not_assessable")
+        freshness = str(security_txt.get("freshness") or "unknown")
         certificate_status = str(security_txt.get("tls_certificate") or "not_observed")
         if availability in availability_counts:
             availability_counts[availability] += 1
         if content_validity in content_counts:
             content_counts[content_validity] += 1
+        if freshness in freshness_counts:
+            freshness_counts[freshness] += 1
         if certificate_status in certificate_counts:
             certificate_counts[certificate_status] += 1
         request = security_txt.get("request") if isinstance(security_txt.get("request"), Mapping) else {}
@@ -801,13 +823,32 @@ def snapshot_summary(domains: list[Mapping[str, Any]]) -> dict[str, Any]:
                 observed_headers.update(str(key) for key, value in headers.items() if value)
         for header in observed_headers:
             header_counts[header] = header_counts.get(header, 0) + 1
+        root_head = domain.get("root_head") if isinstance(domain.get("root_head"), Mapping) else {}
+        upgrade_state = str(root_head.get("upgrade_state") or "unknown")
+        if upgrade_state not in root_upgrade_counts:
+            upgrade_state = "unknown"
+        root_upgrade_counts[upgrade_state] += 1
+        root_headers_seen: set[str] = set()
+        for hop in root_head.get("hops", []) or []:
+            if not isinstance(hop, Mapping):
+                continue
+            headers = hop.get("headers") if isinstance(hop.get("headers"), Mapping) else {}
+            root_headers_seen.update(str(key) for key, value in headers.items() if value)
+        if "strict-transport-security" in root_headers_seen:
+            root_head_hsts_count += 1
+        for header in root_headers_seen:
+            root_head_header_counts[header] = root_head_header_counts.get(header, 0) + 1
     summary["rank_status"] = rank_counts
     summary["security_txt"] = availability_counts
     summary["security_txt_content_validity"] = content_counts
+    summary["security_txt_freshness"] = freshness_counts
     summary["security_txt_tls_certificate"] = certificate_counts
     summary["security_txt_headers"] = header_counts
     summary["security_txt_redirects_to_https"] = https_redirect_count
     summary["security_txt_https_responses"] = https_response_count
+    summary["root_head_https_upgrade"] = root_upgrade_counts
+    summary["root_head_hsts_present"] = root_head_hsts_count
+    summary["root_head_headers"] = root_head_header_counts
     for family in ("spf", "dmarc", "mx", "mta_sts", "tls_reporting"):
         family_counts = {key: 0 for key in ("present_valid", "present_invalid", "absent", "lookup_error")}
         for domain in domains:
@@ -1015,7 +1056,7 @@ def probe_dnssec(
 
 
 def collect_domain(domain: str) -> dict[str, Any]:
-    """Collect email/DNS findings plus one bounded security.txt request chain."""
+    """Collect email/DNS findings, then HEAD / before the security.txt GET."""
     email_error = None
     try:
         checked = check_domain(domain)
@@ -1037,11 +1078,28 @@ def collect_domain(domain: str) -> dict[str, Any]:
     except Exception as error:
         dnssec_evidence = {"status": "lookup_error", "ds": {}, "dnskey": {}, "mx_hosts": [], "explanation": str(error)}
     try:
+        root_head = probe_root_head(domain)
+    except Exception as error:
+        root_head = {
+            "method": "HEAD",
+            "path": "/",
+            "state": "request_error",
+            "status_code": None,
+            "final_url": f"http://{normalize_domain(domain)}/",
+            "upgrades_to_https": None,
+            "upgrade_state": "unknown",
+            "tls_certificate": "not_observed",
+            "headers": {},
+            "hops": [],
+            "error_kind": type(error).__name__,
+        }
+    try:
         security_txt = probe_security_txt(domain)
     except Exception as error:
         security_txt = {
             "availability": "lookup_error",
             "content_validity": "not_assessable",
+            "freshness": "unknown",
             "tls_certificate": "error",
             "request": {
                 "fallback_attempted": False,
@@ -1055,6 +1113,7 @@ def collect_domain(domain: str) -> dict[str, Any]:
         "email_collection_error": email_error,
         "runtime_diagnostics": json_safe(runtime_diagnostics),
         "dnssec_evidence": json_safe(dnssec_evidence),
+        "root_head": json_safe(root_head),
         "security_txt": json_safe(security_txt),
     }
 

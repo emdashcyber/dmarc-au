@@ -28,7 +28,7 @@
         <div class="hero-copy">
           <p class="eyebrow"><span class="eyebrow-rule"></span>TRANCO TOP 1,000,000 · TRACKED .AU NAMES</p>
           <h1 id="page-title">How are .au domains configured for email?</h1>
-          <p class="hero-intro">Explore SPF, DMARC, mail routing, and DNSSEC findings. A small web sample checks only the well-known security.txt endpoint.</p>
+          <p class="hero-intro">Explore SPF, DMARC, mail routing, and DNSSEC findings. The web sample records a root HEAD response before checking the well-known security.txt endpoint.</p>
           <div class="hero-footnote"><span class="source-chip">Weekly snapshot</span><span id="snapshot-meta">Waiting for the first scan</span></div>
         </div>
         <aside class="hero-aside" aria-label="Data source information">
@@ -89,14 +89,15 @@
           <div class="filter-select"><label for="provider-filter">Likely mail service</label><select id="provider-filter"><option value="all">Any service</option></select></div>
           <div class="filter-select"><label for="dnssec-filter">DNSSEC chain</label><select id="dnssec-filter"><option value="all">Any state</option><option value="secure">Secure</option><option value="unsigned">Unsigned</option><option value="broken">Broken</option><option value="lookup_error">Lookup error</option><option value="unknown">Unknown</option></select></div>
           <div class="filter-select"><label for="securitytxt-filter">security.txt availability</label><select id="securitytxt-filter"><option value="all">Any state</option><option value="present">Present</option><option value="absent">Absent</option><option value="http_error">HTTP error</option><option value="lookup_error">Lookup error</option></select></div>
-          <div class="filter-select"><label for="content-validity-filter">security.txt content</label><select id="content-validity-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="not_assessable">Not assessable</option></select></div>
+          <div class="filter-select"><label for="content-validity-filter">security.txt format</label><select id="content-validity-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="not_assessable">Not assessable</option></select></div>
+          <div class="filter-select"><label for="securitytxt-freshness-filter">security.txt freshness</label><select id="securitytxt-freshness-filter"><option value="all">Any state</option><option value="current">Current</option><option value="expired">Expired</option><option value="unknown">Unknown</option></select></div>
           <div class="filter-select"><label for="tls-filter">Endpoint certificate</label><select id="tls-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="error">TLS error</option><option value="not_observed">Not observed</option></select></div>
         </div>
 
         <div class="table-toolbar"><p id="result-count" aria-live="polite">Loading domains…</p><div class="pagination" aria-label="Table pages"><button id="previous-page" class="page-button" type="button" aria-label="Previous page" disabled>←</button><span id="page-label">Page 1</span><button id="next-page" class="page-button" type="button" aria-label="Next page" disabled>→</button></div></div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th scope="col" class="rank-col">TRANCO / .AU</th><th scope="col">DOMAIN</th><th scope="col">SPF</th><th scope="col">DMARC</th><th scope="col">SECURITY.TXT ENDPOINT</th><th scope="col">LIKELY MAIL SERVICES</th><th scope="col">MAIL ROUTING</th><th scope="col">EMAIL EXTRAS</th></tr></thead>
+            <thead><tr><th scope="col" class="rank-col">TRANCO / .AU</th><th scope="col">DOMAIN</th><th scope="col">SPF</th><th scope="col">DMARC</th><th scope="col">ROOT HEAD / SECURITY.TXT</th><th scope="col">LIKELY MAIL SERVICES</th><th scope="col">MAIL ROUTING</th><th scope="col">EMAIL EXTRAS</th></tr></thead>
             <tbody id="domain-rows"><tr><td colspan="8" class="empty-cell">Loading the public snapshot…</td></tr></tbody>
           </table>
         </div>
@@ -107,7 +108,7 @@
       <section class="methodology" aria-labelledby="method-title">
         <div class="method-mark" aria-hidden="true">i</div>
         <div><p class="eyebrow">HOW TO READ THIS DATA</p><h2 id="method-title">Published signals describe configuration at scan time.</h2>
-          <p>SPF, DMARC, mail routing, and DNSSEC findings describe published DNS configuration. The web sample makes a GET request only to <code>/.well-known/security.txt</code>, first over HTTP and then over HTTPS only if HTTP fails before returning a response. Headers, redirects, and certificate validity refer only to that request path. Response bodies and certificate details are processed in memory and discarded.</p>
+          <p>SPF, DMARC, mail routing, and DNSSEC findings describe published DNS configuration. Before the security.txt request, the collector makes a bodyless HTTP <code>HEAD /</code>, follows redirects, and records whether that response chain upgrades to HTTPS, plus selected server and security headers including HSTS. It then GETs only <code>/.well-known/security.txt</code> over HTTP, trying HTTPS only if HTTP fails before returning a response. The HEAD result describes observed redirect behavior; it does not simulate a browser's cached HSTS state. Format validity is separate from expiry freshness, and security.txt redirects and certificate validity are reported independently. Signed-file structure is checked without cryptographic verification. Response bodies and certificate details are processed in memory and discarded.</p>
         </div>
         <div class="method-links"><a href="https://www.rfc-editor.org/rfc/rfc7208" target="_blank" rel="noreferrer">SPF · RFC 7208 ↗</a><a href="https://www.rfc-editor.org/rfc/rfc9989" target="_blank" rel="noreferrer">DMARC · RFC 9989 ↗</a><a href="https://www.rfc-editor.org/rfc/rfc9116" target="_blank" rel="noreferrer">security.txt · RFC 9116 ↗</a></div>
       </section>

@@ -28,7 +28,7 @@ const html = fs.readFileSync("site/index.html", "utf8");
 const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
 const elements = new Map(ids.map((id) => [id, new Element("div")]));
 for (const id of ["error-state", "empty-state", "download-raw"]) elements.get(id).hidden = true;
-for (const id of ["rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "securitytxt-filter", "content-validity-filter", "tls-filter"]) elements.get(id).value = "all";
+for (const id of ["rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "securitytxt-filter", "content-validity-filter", "securitytxt-freshness-filter", "tls-filter"]) elements.get(id).value = "all";
 
 const domains = [
   {
@@ -37,7 +37,7 @@ const domains = [
     spf: { status: "present_valid", valid: true, record: "v=spf1 -all", terminal: { token: "-all", outcome: "fail", label: "Hard fail (-all)" } },
     dmarc: { status: "present_valid", valid: true, record: "v=DMARC1; p=reject", policy: { p: "reject" }, discovery_source: "direct" },
     provider_clues: { outbound: [{ name: "Google Workspace", observed_hosts: ["_spf.google.com"] }] },
-    security_txt: { availability: "present", content_validity: "valid", tls_certificate: "valid", request: { fallback_attempted: false, redirects_to_https: true, status_code: 200, final_url: "https://portal.example.au/.well-known/security.txt", attempts: [{ hops: [{ headers: { server: "nginx", "content-security-policy": "default-src 'self'" } }] }] }, validation: { contact_present: true, expires_present: true, reasons: [] } },
+    security_txt: { availability: "present", content_validity: "valid", freshness: "expired", tls_certificate: "valid", request: { fallback_attempted: false, redirects_to_https: true, cross_host_redirect: true, status_code: 200, final_url: "https://www.portal.example.au/.well-known/security.txt", attempts: [{ hops: [{ headers: { server: "nginx", "content-security-policy": "default-src 'self'" } }] }] }, validation: { contact_present: true, expires_present: true, expired: true, signature_status: "not_signed", reasons: [] } },
     mx: { status: "present_valid", hosts: [{ hostname: "mx.example.au", dnssec_status: "secure" }] },
     mta_sts: { status: "absent" }, tls_reporting: { status: "absent" }, dnssec: { status: "secure", validated: true }, nameservers: ["ns1.example.au"], soa: { mname: "ns1.example.au" }, errors: {},
   },
@@ -64,6 +64,7 @@ const summary = {
   dmarc_policies: { reject: 1 }, spf_qualifiers: { fail: 1 },
   security_txt: { present: 1, absent: 1, lookup_error: 1, http_error: 0 },
   security_txt_content_validity: { valid: 1, invalid: 0, not_assessable: 2 },
+  security_txt_freshness: { current: 0, expired: 1, unknown: 2 },
   security_txt_tls_certificate: { valid: 1, invalid: 0, error: 1, not_observed: 1 },
   security_txt_https_responses: 1,
   dnssec: { secure: 1, unsigned: 1, broken: 0, lookup_error: 1, unknown: 0 },
@@ -117,7 +118,7 @@ async function main() {
 
   const filters = [
     ["rank-filter", "outside_top_1m"], ["provider-filter", "Microsoft 365"], ["tls-filter", "valid"],
-    ["securitytxt-filter", "present"], ["content-validity-filter", "valid"], ["dnssec-filter", "secure"],
+    ["securitytxt-filter", "present"], ["content-validity-filter", "valid"], ["securitytxt-freshness-filter", "expired"], ["dnssec-filter", "secure"],
   ];
   for (const [id, value] of filters) {
     for (const [filterId] of filters) elements.get(filterId).value = "all";
@@ -126,9 +127,15 @@ async function main() {
     control.listeners.change({ target: control });
     assert.equal(rows().length, 1, `${id} filter should return one row`);
   }
+  for (const [filterId] of filters) elements.get(filterId).value = "all";
+  const freshnessFilter = elements.get("securitytxt-freshness-filter");
+  freshnessFilter.value = "unknown";
+  freshnessFilter.listeners.change({ target: freshnessFilter });
+  assert.equal(rows().length, 2, "old or unavailable findings should filter as freshness unknown");
 
   elements.get("rank-filter").value = "all";
   elements.get("provider-filter").value = "all";
+  elements.get("securitytxt-freshness-filter").value = "all";
   const search = elements.get("search-input");
   search.value = "Google Workspace";
   search.listeners.input({ target: search });
@@ -141,6 +148,7 @@ async function main() {
   const detailText = allText(detailRow);
   assert.match(detailText, /v=spf1 -all/);
   assert.match(detailText, /security\.txt endpoint observations/);
+  assert.match(detailText, /present_unverified|signature_status/);
   assert.doesNotMatch(detailText.toLowerCase(), /fingerprint|subject_alt_names|certificate metadata/);
 
   const select = elements.get("snapshot-select");
@@ -152,7 +160,7 @@ async function main() {
   elements.get("search-input").value = "";
   elements.get("download-csv").click();
   const csv = await downloads.at(-1).text();
-  for (const name of ["tranco_rank", "spf_record", "dmarc_record", "security_txt_availability", "security_txt_tls_certificate", "security_txt_https_response_received"]) assert.ok(csv.includes(name));
+  for (const name of ["tranco_rank", "spf_record", "dmarc_record", "security_txt_availability", "security_txt_content_validity", "security_txt_freshness", "security_txt_tls_certificate", "security_txt_cross_host_redirect", "security_txt_https_response_received"]) assert.ok(csv.includes(name));
   assert.ok(csv.includes("Google Workspace"));
   assert.doesNotMatch(csv, /sha256_fingerprint|subject_alt_names|security_txt_body/);
   elements.get("download-json").click();

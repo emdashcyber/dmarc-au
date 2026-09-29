@@ -40,6 +40,7 @@ class SecurityTxtProbeTests(unittest.TestCase):
         self.assertEqual(calls, ["http://example.au/.well-known/security.txt"])
         self.assertEqual(result["availability"], "present")
         self.assertEqual(result["content_validity"], "valid")
+        self.assertEqual(result["freshness"], "current")
         self.assertEqual(result["tls_certificate"], "not_observed")
         serialized = repr(result)
         self.assertNotIn("security@example.au", serialized)
@@ -161,8 +162,8 @@ class SecurityTxtProbeTests(unittest.TestCase):
             (b"Contact: mailto:a@example.au\nExpires: 2027-09-29T00:00:00Z\n", {**HEADERS, "content-type": "text/html"}, "invalid", "content_type_invalid"),
             (b"Contact: mailto:a@example.au\nExpires: 2027-09-29T00:00:00Z\n\xff", HEADERS, "invalid", "utf8_invalid"),
             (b"Expires: 2027-09-29T00:00:00Z\n", HEADERS, "invalid", "contact_missing"),
-            (b"Contact: mailto:a@example.au\nExpires: 2025-09-29T00:00:00Z\n", HEADERS, "invalid", "expired"),
             (b"Contact: mailto:a@example.au\n", HEADERS, "invalid", "expires_missing"),
+            (b"Contact: mailto:a@example.au\nExpires: 2027-02-30T00:00:00Z\n", HEADERS, "invalid", "expires_malformed"),
         ]
         for body, headers, expected, reason in samples:
             with self.subTest(reason=reason):
@@ -174,6 +175,182 @@ class SecurityTxtProbeTests(unittest.TestCase):
                 self.assertEqual(result["content_validity"], expected)
                 self.assertIn(reason, result["validation"]["reasons"])
 
+    def test_rfc3339_expires_accepts_lowercase_case_fraction_and_offsets(self):
+        values = (
+            "2027-09-29T00:00:00Z",
+            "2027-09-29t00:00:00z",
+            "2027-09-29T00:00:00.123456789Z",
+            "2027-09-29T10:30:00+10:30",
+            "2027-09-28T13:30:00-10:30",
+        )
+        for value in values:
+            body = f"Contact: mailto:a@example.au\nExpires: {value}\n".encode()
+            with self.subTest(value=value), patch.object(web_checks, "request_chain", return_value=response(body=body)):
+                result = web_checks.probe_security_txt("example.au", now=NOW)
+            self.assertEqual(result["content_validity"], "valid")
+            self.assertEqual(result["freshness"], "current")
+            self.assertTrue(result["validation"]["expires_valid"])
+
+    def test_expired_security_txt_is_format_valid_but_stale(self):
+        body = b"Contact: mailto:a@example.au\nExpires: 2025-09-29T00:00:00Z\n"
+        with patch.object(web_checks, "request_chain", return_value=response(body=body)):
+            result = web_checks.probe_security_txt("example.au", now=NOW)
+        self.assertEqual(result["content_validity"], "valid")
+        self.assertEqual(result["freshness"], "expired")
+        self.assertTrue(result["validation"]["expired"])
+        self.assertTrue(result["validation"]["expires_valid"])
+        self.assertNotIn("expired", result["validation"]["reasons"])
+
+    def test_leap_seconds_are_accepted_only_at_announced_utc_instants(self):
+        valid = web_checks._parse_security_txt(
+            "Contact: mailto:a@example.au\nExpires: 2016-12-31T23:59:60Z\n", NOW
+        )
+        self.assertTrue(valid["expires_valid"])
+        self.assertEqual(valid["freshness"], "expired")
+        invalid = web_checks._parse_security_txt(
+            "Contact: mailto:a@example.au\nExpires: 2017-12-31T23:59:60Z\n", NOW
+        )
+        self.assertFalse(invalid["expires_valid"])
+        self.assertIn("expires_malformed", invalid["reasons"])
+
+    def test_duplicate_expires_is_invalid_even_when_both_dates_parse(self):
+        parsed = web_checks._parse_security_txt(
+            "Contact: mailto:a@example.au\n"
+            "Expires: 2027-09-29T00:00:00Z\n"
+            "Expires: 2028-09-29T00:00:00Z\n",
+            NOW,
+        )
+        self.assertIn("expires_multiple", parsed["reasons"])
+        self.assertFalse(parsed["expires_valid"])
+        self.assertEqual(parsed["freshness"], "unknown")
+
+    def test_expires_requires_ascii_rfc3339_digits(self):
+        parsed = web_checks._parse_security_txt(
+            "Contact: mailto:a@example.au\nExpires: ٢٠٢٧-09-29T00:00:00Z\n", NOW
+        )
+        self.assertFalse(parsed["expires_valid"])
+        self.assertIn("expires_malformed", parsed["reasons"])
+
+    def test_contact_schemes_and_https_urls_without_paths(self):
+        for contact in (
+            "mailto:security@example.au",
+            "tel:+61-2-1234-5678",
+            "https://example.au",
+        ):
+            with self.subTest(contact=contact):
+                parsed = web_checks._parse_security_txt(
+                    f"Contact: {contact}\nExpires: 2027-09-29T00:00:00Z\n", NOW
+                )
+                self.assertTrue(parsed["contact_valid"])
+                self.assertEqual(parsed["reasons"], [])
+        for contact in ("http://example.au/contact", "mailto:", "tel:", "https://"):
+            with self.subTest(contact=contact):
+                parsed = web_checks._parse_security_txt(
+                    f"Contact: {contact}\nExpires: 2027-09-29T00:00:00Z\n", NOW
+                )
+                self.assertFalse(parsed["contact_valid"])
+                self.assertIn("contact_invalid", parsed["reasons"])
+
+    def test_optional_fields_extensions_and_language_tags(self):
+        valid = (
+            "contact: mailto:security@example.au\n"
+            "Contact: tel:+61-2-1234-5678\n"
+            "Preferred-Languages: en, en-AU, zh-Hant-TW\n"
+            "Policy: https://example.au/disclosure\n"
+            "Encryption: dns:example.au?type=OPENPGPKEY\n"
+            "X-Research-Note: extension field is accepted\n"
+            "Expires: 2027-09-29T00:00:00Z\n"
+        )
+        parsed = web_checks._parse_security_txt(valid, NOW)
+        self.assertEqual(parsed["reasons"], [])
+        self.assertTrue(parsed["uri_fields_valid"])
+        self.assertTrue(parsed["preferred_languages_valid"])
+
+        invalid_samples = (
+            "Contact: mailto:a@example.au\nPreferred-Languages: en,,fr\nExpires: 2027-09-29T00:00:00Z\n",
+            "Contact: mailto:a@example.au\nPreferred-Languages: en\nPreferred-Languages: fr\nExpires: 2027-09-29T00:00:00Z\n",
+            "Contact: mailto:a@example.au\nPolicy: http://example.au/policy\nExpires: 2027-09-29T00:00:00Z\n",
+            "Contact: mailto:a@example.au\nPolicy: https://example.au/%zz\nExpires: 2027-09-29T00:00:00Z\n",
+        )
+        for value in invalid_samples:
+            with self.subTest(value=value):
+                self.assertTrue(web_checks._parse_security_txt(value, NOW)["reasons"])
+
+    def test_field_grammar_line_endings_and_net_unicode(self):
+        valid_lf = "# comment\nContact: mailto:a@example.au\n\nExpires: 2027-09-29T00:00:00Z\n"
+        valid_mixed = "Contact: mailto:a@example.au\r\nExpires: 2027-09-29T00:00:00Z\n"
+        self.assertEqual(web_checks._parse_security_txt(valid_lf, NOW)["reasons"], [])
+        self.assertEqual(web_checks._parse_security_txt(valid_mixed, NOW)["reasons"], [])
+        invalid = (
+            "Contact: mailto:a@example.au\nExpires: 2027-09-29T00:00:00Z",
+            " Contact: mailto:a@example.au\nExpires: 2027-09-29T00:00:00Z\n",
+            "# ok\nContact: mailto:a@example.au\rExpires: 2027-09-29T00:00:00Z\n",
+            "Contact: mailto:a@example.au\n\ufeffExpires: 2027-09-29T00:00:00Z\n",
+            "Contact: mailto:a@example.au\nX-Field: invalid\u0085control\nExpires: 2027-09-29T00:00:00Z\n",
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertTrue(web_checks._parse_security_txt(value, NOW)["reasons"])
+
+    def test_resource_limits_are_not_assessed_as_invalid(self):
+        too_many_lines = "Contact: mailto:a@example.au\n" + "# line\n" * 999 + "Expires: 2027-09-29T00:00:00Z\n"
+        too_long_field = "Contact: mailto:a@example.au\nX-Note: " + ("x" * 2048) + "\nExpires: 2027-09-29T00:00:00Z\n"
+        for value in (too_many_lines, too_long_field):
+            with self.subTest(length=len(value)):
+                parsed = web_checks._parse_security_txt(value, NOW)
+                self.assertTrue(parsed["not_assessable"])
+                self.assertEqual(parsed["reasons"], ["parser_limit_exceeded"])
+
+    def test_signed_file_structure_is_accepted_but_not_verified(self):
+        signed = (
+            "-----BEGIN PGP SIGNED MESSAGE-----\r\n"
+            "Hash: SHA256\r\n\r\n"
+            "Contact: mailto:security@example.au\r\n"
+            "Expires: 2027-09-29T00:00:00Z\r\n"
+            "-----BEGIN PGP SIGNATURE-----\r\n"
+            "Version: GnuPG v2.2\r\n\r\n"
+            "YWJjZA==\r\n"
+            "-----END PGP SIGNATURE-----\r\n"
+        )
+        parsed = web_checks._parse_security_txt(signed, NOW)
+        self.assertEqual(parsed["reasons"], [])
+        self.assertEqual(parsed["signature_status"], "present_unverified")
+        malformed = web_checks._parse_security_txt(
+            "-----BEGIN PGP SIGNED MESSAGE-----\nContact: mailto:a@example.au\n", NOW
+        )
+        self.assertEqual(malformed["signature_status"], "invalid")
+        self.assertIn("signed_format_invalid", malformed["reasons"])
+
+    def test_cross_host_redirect_is_reported_without_invalidating_content(self):
+        url = "http://example.au/.well-known/security.txt"
+        target = "https://www.example.au/.well-known/security.txt"
+        chain = {
+            "url": url, "final_url": target, "state": "response", "status_code": 200,
+            "headers": dict(HEADERS), "redirects_to_https": True,
+            "hops": [
+                {"url": url, "status_code": 301, "redirect_to": target, "headers": {"location": target}},
+                {"url": target, "status_code": 200, "headers": dict(HEADERS), "tls_certificate": "valid"},
+            ], "tls_certificate": "valid", "body_complete": True,
+        }
+        with patch.object(web_checks, "request_chain", return_value=(chain, VALID_TEXT)):
+            result = web_checks.probe_security_txt("example.au", now=NOW)
+        self.assertEqual(result["content_validity"], "valid")
+        self.assertTrue(result["request"]["cross_host_redirect"])
+
+    def test_content_type_requires_text_plain_and_well_formed_utf8_charset(self):
+        accepted = (
+            "text/plain", "Text/Plain; charset=utf-8", "text/plain; charset=\"UTF-8\"",
+            'text/plain; title="research; contact"; charset=utf-8',
+        )
+        rejected = (
+            "text/html", "text/plain; charset=latin1", "text/plain; charset",
+            "text/plain; charset=", "text/plain; charset=utf-8; charset=utf-8",
+        )
+        for value in accepted:
+            self.assertTrue(web_checks._content_type_valid({"content-type": value}), value)
+        for value in rejected:
+            self.assertFalse(web_checks._content_type_valid({"content-type": value}), value)
+
     def test_truncated_body_is_not_assessed_as_invalid(self):
         result_value, body = response(body=VALID_TEXT, body_complete=False, body_truncated=True)
         with patch.object(web_checks, "request_chain", return_value=(result_value, body)):
@@ -181,6 +358,16 @@ class SecurityTxtProbeTests(unittest.TestCase):
         self.assertEqual(result["availability"], "present")
         self.assertEqual(result["content_validity"], "not_assessable")
         self.assertEqual(result["validation"]["reasons"], ["body_incomplete"])
+
+    def test_complete_response_over_body_limit_is_not_assessed(self):
+        body = b"x" * (web_checks.MAX_SECURITY_TXT_BYTES + 1)
+        result_value, _ = response(body=body)
+        with patch.object(web_checks, "request_chain", return_value=(result_value, body)):
+            result = web_checks.probe_security_txt("example.au", now=NOW)
+        self.assertEqual(result["availability"], "present")
+        self.assertEqual(result["content_validity"], "not_assessable")
+        self.assertEqual(result["freshness"], "unknown")
+        self.assertEqual(result["validation"]["reasons"], ["parser_limit_exceeded"])
 
     def test_request_chain_follows_bounded_redirects_and_keeps_only_selected_headers(self):
         start = "http://example.au/.well-known/security.txt"

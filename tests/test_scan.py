@@ -94,6 +94,16 @@ class SPFTests(unittest.TestCase):
 
 
 class StatusAndNormalizationTests(unittest.TestCase):
+    def test_security_txt_summary_counts_expiry_separately_and_defaults_old_rows_unknown(self):
+        summary = snapshot_summary([
+            {"domain": "fresh.example.au", "security_txt": {"availability": "present", "content_validity": "valid", "freshness": "current"}},
+            {"domain": "stale.example.au", "security_txt": {"availability": "present", "content_validity": "valid", "freshness": "expired"}},
+            {"domain": "old.example.au", "security_txt": {"availability": "present", "content_validity": "invalid"}},
+        ])
+        self.assertEqual(summary["security_txt_content_validity"]["valid"], 2)
+        self.assertEqual(summary["security_txt_content_validity"]["invalid"], 1)
+        self.assertEqual(summary["security_txt_freshness"], {"current": 1, "expired": 1, "unknown": 1})
+
     def test_missing_invalid_and_transient_errors_are_distinct(self):
         self.assertEqual(classify_record({"record": None, "valid": False, "error": "An SPF record does not exist."}), "absent")
         self.assertEqual(classify_record({"record": None, "valid": False, "error": "DNSExceptionNXDOMAIN: The domain does not exist."}), "absent")

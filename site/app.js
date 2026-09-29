@@ -38,6 +38,7 @@
       not_observed: ["Not observed", "dim"], secure: ["Secure", "good"], unsigned: ["Unsigned", "warn"],
       broken: ["Broken", "bad"], unknown: ["Unknown", "dim"], in_top_1m: ["Top 1M", "good"],
       outside_top_1m: [">1M", "warn"], present: ["Present", "good"],
+      current: ["Current", "good"], expired: ["Expired", "warn"],
     };
     return labels[status] || [display(status), "dim"];
   }
@@ -52,6 +53,15 @@
   function statusCount(summary, family, status) { return Number(object(summary[family])[status] || 0); }
   function policyCount(summary, policy) { return Number(object(summary.dmarc_policies)[policy] || 0); }
 
+  function freshnessCount(snapshot, status) {
+    const summaryCounts = object(summaryOf(snapshot).security_txt_freshness);
+    if (Object.prototype.hasOwnProperty.call(summaryCounts, status)) return Number(summaryCounts[status] || 0);
+    return safeArray(snapshot && snapshot.domains).filter((domain) => {
+      const freshness = object(domain.security_txt).freshness || "unknown";
+      return freshness === status;
+    }).length;
+  }
+
   function setMetricCards(snapshot) {
     const target = byId("metrics");
     target.replaceChildren();
@@ -60,6 +70,7 @@
     const ranked = Number(object(summary.rank_status).in_top_1m ?? object(snapshot.source).au_entry_count ?? total);
     const enforced = policyCount(summary, "reject") + policyCount(summary, "quarantine");
     const hardFail = Number(object(summary.spf_qualifiers).fail || 0);
+    const hasFreshnessSummary = Object.keys(object(summary.security_txt_freshness)).length > 0;
     const items = [
       ["Tracked .au names", count(total), "current rankings plus retained roster", "accent"],
       ["In current top 1M", count(ranked), `${ratio(ranked, total)} of tracked names`, ""],
@@ -68,7 +79,7 @@
       ["DMARC record absent", count(statusCount(summary, "dmarc", "absent")), "no record found", ""],
       ["SPF record absent", count(statusCount(summary, "spf", "absent")), "no record found", ""],
       ["security.txt present", count(statusCount(summary, "security_txt", "present")), "well-known endpoint returned 2xx", ""],
-      ["Valid security.txt", count(statusCount(summary, "security_txt_content_validity", "valid")), "content checks only", "good"],
+      [hasFreshnessSummary ? "Format-valid security.txt" : "Reported-valid security.txt", count(statusCount(summary, "security_txt_content_validity", "valid")), hasFreshnessSummary ? "expiry reported separately" : "legacy result; expiry may affect validity", "good"],
     ];
     for (const [label, value, foot, tone] of items) {
       const card = el("article", `metric-card ${tone}`);
@@ -98,6 +109,7 @@
   function drawCharts(snapshot) {
     const summary = summaryOf(snapshot);
     const total = Number(summary.domain_count || 0);
+    const hasFreshnessSummary = Object.keys(object(summary.security_txt_freshness)).length > 0;
     drawBars("policy-chart", [
       { label: "Reject", value: policyCount(summary, "reject"), tone: "reject" },
       { label: "Quarantine", value: policyCount(summary, "quarantine"), tone: "quarantine" },
@@ -115,14 +127,21 @@
       { label: "MX targets broken / error", value: Number(mxDnssec.broken || 0) + Number(mxDnssec.lookup_error || 0), tone: "quarantine" },
     ], "Domain and MX host DNSSEC findings");
     drawBars("web-chart", [
+      { label: "Root HEAD upgrades to HTTPS", value: Number(object(summary.root_head_https_upgrade).upgraded || 0), tone: "reject" },
+      { label: "No root HEAD HTTPS redirect", value: Number(object(summary.root_head_https_upgrade).not_upgraded || 0), tone: "none" },
+      { label: "Root HEAD upgrade unknown", value: Number(object(summary.root_head_https_upgrade).unknown || 0), tone: "missing" },
+      { label: "Root HEAD HSTS observed", value: Number(summary.root_head_hsts_present || 0), tone: "quarantine" },
       { label: "Endpoint present", value: statusCount(summary, "security_txt", "present"), tone: "reject" },
       { label: "Endpoint absent", value: statusCount(summary, "security_txt", "absent"), tone: "none" },
       { label: "HTTP errors", value: statusCount(summary, "security_txt", "http_error"), tone: "quarantine" },
       { label: "Lookup errors", value: statusCount(summary, "security_txt", "lookup_error"), tone: "missing" },
-      { label: "Content valid", value: statusCount(summary, "security_txt_content_validity", "valid"), tone: "reject" },
-      { label: "Content invalid", value: statusCount(summary, "security_txt_content_validity", "invalid"), tone: "missing" },
+      { label: hasFreshnessSummary ? "Format valid" : "Reported valid", value: statusCount(summary, "security_txt_content_validity", "valid"), tone: "reject" },
+      { label: hasFreshnessSummary ? "Format invalid" : "Reported invalid", value: statusCount(summary, "security_txt_content_validity", "invalid"), tone: "missing" },
+      { label: "Expiry current", value: freshnessCount(state.snapshot, "current"), tone: "good" },
+      { label: "Expired / stale", value: freshnessCount(state.snapshot, "expired"), tone: "quarantine" },
+      { label: "Freshness unknown", value: freshnessCount(state.snapshot, "unknown"), tone: "none" },
       { label: "HTTPS response observed", value: Number(summary.security_txt_https_responses || 0), tone: "quarantine" },
-    ], "security.txt endpoint availability and content validation");
+    ], "Root HTTP HEAD upgrade behavior and security.txt endpoint findings");
     drawHistoryChart();
   }
 
@@ -213,6 +232,12 @@
     const fields = [domain.domain, domain.rank_display, object(domain.spf).record, object(domain.dmarc).record];
     for (const item of providerNames(domain)) fields.push(item.name, ...item.hosts);
     for (const host of safeArray(object(domain.mx).hosts)) fields.push(host.hostname);
+    const rootHead = object(domain.root_head);
+    fields.push(rootHead.final_url, rootHead.upgrade_state);
+    for (const hop of safeArray(rootHead.hops)) {
+      fields.push(hop.url, hop.redirect_to);
+      for (const value of Object.values(object(hop.headers))) fields.push(...(Array.isArray(value) ? value : [value]));
+    }
     const request = object(object(domain.security_txt).request);
     for (const attempt of safeArray(request.attempts)) {
       fields.push(attempt.final_url);
@@ -234,6 +259,7 @@
     const dnssec = byId("dnssec-filter").value;
     const availability = byId("securitytxt-filter").value;
     const contentValidity = byId("content-validity-filter").value;
+    const freshness = byId("securitytxt-freshness-filter").value;
     const certificate = byId("tls-filter").value;
     state.filtered = state.domains.filter((domain) => {
       if (query && !searchableText(domain).includes(query)) return false;
@@ -255,6 +281,7 @@
       const security = object(domain.security_txt);
       if (availability !== "all" && security.availability !== availability) return false;
       if (contentValidity !== "all" && security.content_validity !== contentValidity) return false;
+      if (freshness !== "all" && (security.freshness || "unknown") !== freshness) return false;
       if (certificate !== "all" && security.tls_certificate !== certificate) return false;
       return true;
     });
@@ -300,11 +327,23 @@
 
   function securityCell(domain) {
     const finding = object(domain.security_txt);
+    const rootHead = object(domain.root_head);
     const cell = el("div", "extra-list");
+    if (rootHead.upgrades_to_https === true) cell.append(el("span", "extra-chip good", "HEAD / → HTTPS"));
+    else if (rootHead.upgrades_to_https === false) cell.append(el("span", "extra-chip dim", "No HTTPS redirect"));
+    else cell.append(el("span", "extra-chip dim", "HEAD / upgrade unknown"));
+    const headHeaders = mergedHeaders(safeArray(rootHead.hops));
+    const hsts = headHeaders["strict-transport-security"];
+    if (hsts) {
+      const chip = el("span", "extra-chip info", "HSTS observed");
+      chip.title = asText(hsts);
+      cell.append(chip);
+    }
     cell.append(pill(finding.availability, `File ${statusInfo(finding.availability)[0].toLowerCase()}`));
     cell.append(pill(finding.content_validity, `Content ${statusInfo(finding.content_validity)[0].toLowerCase()}`));
+    cell.append(pill(finding.freshness || "unknown", `Freshness ${statusInfo(finding.freshness || "unknown")[0].toLowerCase()}`));
     cell.append(pill(finding.tls_certificate, `TLS ${statusInfo(finding.tls_certificate)[0].toLowerCase()}`));
-    if (object(finding.request).redirects_to_https) cell.append(el("span", "extra-chip good", "Redirected to HTTPS"));
+    if (object(finding.request).cross_host_redirect) cell.append(el("span", "extra-chip warn", "Cross-host redirect"));
     return cell;
   }
 
@@ -322,11 +361,44 @@
     return cell;
   }
 
-  function detailBlock(parent, title, value, wide = false) {
-    const block = el("section", `detail-block${wide ? " wide" : ""}`);
-    block.append(el("h4", "", title));
-    const pre = el("pre", "", serialize(value));
-    block.append(pre);
+  function asText(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (Array.isArray(value)) return value.map((item) => typeof item === "object" && item !== null ? JSON.stringify(item) : String(item)).join(" · ") || "—";
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  }
+
+  function mergedHeaders(hops) {
+    const headers = {};
+    for (const hop of hops) {
+      for (const [name, raw] of Object.entries(object(hop && hop.headers))) {
+        const values = Array.isArray(raw) ? raw : [raw];
+        const current = Array.isArray(headers[name]) ? headers[name] : headers[name] ? [headers[name]] : [];
+        for (const value of values) if (value && !current.includes(value)) current.push(value);
+        if (current.length) headers[name] = current.length === 1 ? current[0] : current;
+      }
+    }
+    return headers;
+  }
+
+  function detailBlock(parent, title, hint, facts, rawValue, wide = false) {
+    const block = el("details", `detail-block${wide ? " wide" : ""}`);
+    const heading = el("summary", "detail-summary");
+    heading.append(el("strong", "detail-title", title), el("span", "detail-summary-hint", hint));
+    block.append(heading);
+    const body = el("div", "detail-body");
+    const list = el("dl", "finding-facts");
+    for (const [label, value] of facts) {
+      const item = el("div", "finding-fact");
+      item.append(el("dt", "", label), el("dd", "", asText(value)));
+      list.append(item);
+    }
+    body.append(list);
+    const evidence = el("details", "raw-evidence");
+    evidence.append(el("summary", "", "Show raw evidence"));
+    evidence.append(el("pre", "", serialize(rawValue)));
+    body.append(evidence);
+    block.append(body);
     parent.append(block);
   }
 
@@ -335,16 +407,95 @@
     const cell = el("td");
     cell.colSpan = 8;
     const content = el("div", "detail-content");
-    detailBlock(content, "Email authentication and routing", {
-      spf: domain.spf, dmarc: domain.dmarc, mx: domain.mx, mta_sts: domain.mta_sts, tls_reporting: domain.tls_reporting,
-    });
-    detailBlock(content, "Email DNS and DNSSEC", {
-      dnssec: domain.dnssec, nameservers: domain.nameservers, soa: domain.soa,
-      mx_dnssec: safeArray(object(domain.mx).hosts).map((host) => ({ hostname: host.hostname, status: host.dnssec_status, evidence: host.dnssec_evidence })),
-    });
-    detailBlock(content, "Inferred mail services", domain.provider_clues || {});
-    detailBlock(content, "security.txt endpoint observations", domain.security_txt || {}, true);
-    if (domain.errors && Object.keys(domain.errors).length) detailBlock(content, "Collection notes", domain.errors, true);
+    const spf = object(domain.spf);
+    const dmarc = object(domain.dmarc);
+    const policy = object(dmarc.policy);
+    const alignment = object(dmarc.alignment);
+    const uris = object(dmarc.reporting_uris);
+    const mx = object(domain.mx);
+    const dnssec = object(domain.dnssec);
+    const rootHead = object(domain.root_head);
+    const security = object(domain.security_txt);
+    const securityRequest = object(security.request);
+    const securityHops = safeArray(securityRequest.attempts).flatMap((attempt) => safeArray(object(attempt).hops));
+    const headHeaders = mergedHeaders(safeArray(rootHead.hops));
+    const securityHeaders = mergedHeaders(securityHops);
+    const headUpgrade = rootHead.upgrade_state === "upgraded" ? "Upgraded to HTTPS" : rootHead.upgrade_state === "not_upgraded" ? "No HTTPS redirect observed" : "Unknown";
+    const terminal = object(spf.terminal);
+    const spfState = statusInfo(spf.status || "unknown")[0];
+    const dmarcState = statusInfo(dmarc.status || "unknown")[0];
+
+    detailBlock(content, "SPF and DMARC", `${spfState} SPF · ${dmarcState} DMARC`, [
+      ["SPF record", spf.record],
+      ["SPF terminal", terminal.label || (terminal.token ? `${terminal.token} · ${terminal.outcome}` : terminal.outcome)],
+      ["SPF DNS lookups", spf.dns_lookups],
+      ["SPF void lookups", spf.void_dns_lookups],
+      ["SPF mechanisms", spf.mechanisms],
+      ["SPF targets", spf.service_targets],
+      ["SPF warnings / error", [...safeArray(spf.warnings), spf.error].filter(Boolean)],
+      ["DMARC record", dmarc.record],
+      ["DMARC discovery", `${dmarc.discovery_source || "unknown"}${dmarc.location ? ` · ${dmarc.location}` : ""}`],
+      ["DMARC policy", `p=${display(policy.p)} · sp=${display(policy.sp)} · np=${display(policy.np)}`],
+      ["DMARC alignment", `adkim=${display(alignment.adkim)} · aspf=${display(alignment.aspf)}`],
+      ["Test mode", dmarc.test_mode],
+      ["Aggregate reports", uris.rua],
+      ["Forensic reports", uris.ruf],
+      ["Report destinations", dmarc.reporting_hosts],
+      ["DMARC warnings / error", [...safeArray(dmarc.warnings), dmarc.error].filter(Boolean)],
+    ], { spf, dmarc });
+
+    detailBlock(content, "Mail routing and DNSSEC", `${statusInfo(mx.status || "unknown")[0]} MX · ${statusInfo(dnssec.status || "unknown")[0]} DNSSEC`, [
+      ["MX hosts", safeArray(mx.hosts).map((host) => `${host.hostname} (priority ${display(host.preference)}; DNSSEC ${display(host.dnssec_status)})`)],
+      ["MX error / warnings", [mx.error, ...safeArray(mx.warnings)].filter(Boolean)],
+      ["MTA-STS", `${statusInfo(object(domain.mta_sts).status || "unknown")[0]} · ${display(object(domain.mta_sts).record)}`],
+      ["TLS reporting", `${statusInfo(object(domain.tls_reporting).status || "unknown")[0]} · ${display(object(domain.tls_reporting).record)}`],
+      ["DNSSEC chain", dnssec.status],
+      ["DS evidence", object(dnssec.ds).status],
+      ["DNSKEY evidence", object(dnssec.dnskey).status],
+      ["DNSSEC explanation", dnssec.explanation],
+      ["Name servers", domain.nameservers],
+      ["SOA", domain.soa],
+    ], { mx, mta_sts: domain.mta_sts, tls_reporting: domain.tls_reporting, dnssec, nameservers: domain.nameservers, soa: domain.soa });
+
+    const providers = object(domain.provider_clues);
+    const providerFacts = ["outbound", "inbound", "reporting"].map((role) => [
+      `${role[0].toUpperCase()}${role.slice(1)} services`,
+      safeArray(providers[role]).map((provider) => `${provider.name}: ${safeArray(provider.observed_hosts).join(", ")}`),
+    ]);
+    const providerTotal = ["outbound", "inbound", "reporting"].reduce((total, role) => total + safeArray(providers[role]).length, 0);
+    detailBlock(content, "Inferred mail services", `${count(providerTotal)} provider clues`, providerFacts, providers);
+
+    const headHeaderFacts = Object.entries(headHeaders).filter(([name]) => !["server", "strict-transport-security"].includes(name)).map(([name, value]) => [
+      `HEAD ${name === "strict-transport-security" ? "HSTS" : name.replaceAll("-", " ")}`,
+      value,
+    ]);
+    const securityHeaderFacts = Object.entries(securityHeaders).map(([name, value]) => [`GET ${name.replaceAll("-", " ")}`, value]);
+    const route = (hops) => hops.map((hop) => `${hop.url || "?"}${hop.redirect_to ? ` → ${hop.redirect_to}` : ` · ${display(hop.status_code)}`}`).join(" · ") || "No response hops";
+    const webFacts = [
+      ["Root HEAD result", `${headUpgrade} · ${display(rootHead.status_code)}`],
+      ["Root HEAD final URL", rootHead.final_url],
+      ["Root HEAD TLS", rootHead.tls_certificate],
+      ["Root HEAD redirect path", route(safeArray(rootHead.hops))],
+      ["HEAD Server", headHeaders.server || "Not returned"],
+      ["HEAD HSTS", headHeaders["strict-transport-security"] || "Not returned"],
+      ...headHeaderFacts,
+      ["security.txt availability", security.availability],
+      ["security.txt format", security.content_validity],
+      ["security.txt freshness", security.freshness || "unknown"],
+      ["security.txt TLS", security.tls_certificate],
+      ["security.txt status / URL", `${display(securityRequest.status_code)} · ${display(securityRequest.final_url)}`],
+      ["security.txt HTTP fallback", securityRequest.fallback_attempted],
+      ["security.txt path HTTPS redirect", securityRequest.redirects_to_https],
+      ["security.txt cross-host redirect", securityRequest.cross_host_redirect],
+      ["security.txt redirect path", route(securityHops)],
+      ["Validation findings", object(security.validation).reasons],
+      ...securityHeaderFacts,
+    ];
+    detailBlock(content, "Root HEAD and security.txt", `${headUpgrade} · ${display(security.availability)} file`, webFacts, { root_head: rootHead, security_txt: security }, true);
+
+    if (domain.errors && Object.keys(domain.errors).length) {
+      detailBlock(content, "Collection notes", `${count(Object.keys(domain.errors).length)} notes`, Object.entries(domain.errors), domain.errors, true);
+    }
     cell.append(content);
     row.append(cell);
     return row;
@@ -457,7 +608,8 @@
       "spf_status", "spf_valid", "spf_record", "spf_terminal", "spf_dns_lookups", "spf_void_lookups", "spf_mechanisms", "spf_service_targets",
       "dmarc_status", "dmarc_valid", "dmarc_record", "dmarc_location", "dmarc_discovery_source", "dmarc_policy_p", "dmarc_policy_sp", "dmarc_policy_np", "dmarc_alignment", "dmarc_test_mode", "dmarc_reporting_uris", "dmarc_reporting_hosts",
       "outbound_services", "inbound_services", "reporting_services", "mx_status", "mx_hosts", "mta_sts_status", "mta_sts_record", "tls_reporting_status", "tls_reporting_record", "dnssec_status", "dnssec_evidence", "mx_dnssec_evidence", "nameservers", "soa",
-      "security_txt_availability", "security_txt_content_validity", "security_txt_tls_certificate", "security_txt_http_fallback", "security_txt_redirects_to_https", "security_txt_https_response_received", "security_txt_status_code", "security_txt_final_url", "security_txt_attempts", "security_txt_validation", "errors",
+      "root_head_method", "root_head_path", "root_head_state", "root_head_upgrade_state", "root_head_upgrades_to_https", "root_head_status_code", "root_head_final_url", "root_head_tls_certificate", "root_head_headers", "root_head_hops",
+      "security_txt_availability", "security_txt_content_validity", "security_txt_freshness", "security_txt_tls_certificate", "security_txt_http_fallback", "security_txt_redirects_to_https", "security_txt_cross_host_redirect", "security_txt_https_response_received", "security_txt_status_code", "security_txt_final_url", "security_txt_attempts", "security_txt_validation", "errors",
     ];
     const rows = [headers];
     for (const domain of state.filtered) {
@@ -465,6 +617,7 @@
       const names = (role) => safeArray(providers[role]).map((item) => item.name).join("; ");
       const security = object(domain.security_txt);
       const request = object(security.request);
+      const rootHead = object(domain.root_head);
       const terminal = object(object(domain.spf).terminal);
       const mx = object(domain.mx);
       const securityDnssec = safeArray(mx.hosts).map((host) => ({ hostname: host.hostname, status: host.dnssec_status, evidence: host.dnssec_evidence }));
@@ -474,7 +627,8 @@
         object(domain.dmarc).status, object(domain.dmarc).valid, object(domain.dmarc).record, object(domain.dmarc).location, object(domain.dmarc).discovery_source, object(object(domain.dmarc).policy).p, object(object(domain.dmarc).policy).sp, object(object(domain.dmarc).policy).np, object(domain.dmarc).alignment, object(domain.dmarc).test_mode, object(domain.dmarc).reporting_uris, object(domain.dmarc).reporting_hosts,
         names("outbound"), names("inbound"), names("reporting"), mx.status, safeArray(mx.hosts).map((host) => host.hostname).join("; "), object(domain.mta_sts).status, object(domain.mta_sts).record, object(domain.tls_reporting).status, object(domain.tls_reporting).record,
         object(domain.dnssec).status, domain.dnssec, securityDnssec, domain.nameservers, domain.soa,
-        security.availability, security.content_validity, security.tls_certificate, request.fallback_attempted, request.redirects_to_https, request.https_response_received, request.status_code, request.final_url, request.attempts, security.validation, domain.errors,
+        rootHead.method, rootHead.path, rootHead.state, rootHead.upgrade_state, rootHead.upgrades_to_https, rootHead.status_code, rootHead.final_url, rootHead.tls_certificate, mergedHeaders(safeArray(rootHead.hops)), rootHead.hops,
+        security.availability, security.content_validity, security.freshness || "unknown", security.tls_certificate, request.fallback_attempted, request.redirects_to_https, request.cross_host_redirect, request.https_response_received, request.status_code, request.final_url, request.attempts, security.validation, domain.errors,
       ]);
     }
     const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
@@ -538,7 +692,7 @@
     }
   });
 
-  for (const id of ["search-input", "rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "securitytxt-filter", "content-validity-filter", "tls-filter"]) {
+  for (const id of ["search-input", "rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "securitytxt-filter", "content-validity-filter", "securitytxt-freshness-filter", "tls-filter"]) {
     byId(id).addEventListener(id === "search-input" ? "input" : "change", () => { state.page = 1; getFilteredDomains(); });
   }
   byId("previous-page").addEventListener("click", () => { state.page = Math.max(1, state.page - 1); renderTable(); });
