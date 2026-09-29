@@ -10,13 +10,13 @@ from collector.scan import (
     _dnssec_mx_diagnostics,
     effective_spf_terminal,
     infer_provider_clues,
-    infer_web_provider_clues,
     is_au_domain,
     normalize_domain_result,
     parse_ranked_csv,
     probe_dnssec,
     field_size_report,
     snapshot_summary,
+    ScanError,
     write_snapshot,
 )
 from collector.workflow import merge_scan, split_domains
@@ -113,20 +113,6 @@ class StatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(clues["outbound"][0]["observed_hosts"], ["_spf.google.com"])
         self.assertEqual(clues["inbound"][0]["name"], "Google Workspace")
         self.assertEqual(clues["reporting"][0]["name"], "dmarcian")
-
-    def test_web_provider_hints_retain_dns_and_header_evidence(self):
-        clues = infer_web_provider_clues(
-            {"cname": {"status": "present", "records": ["edge.cloudflare.net."]}},
-            {"headers": {"server": "cloudflare", "x-powered-by": "nginx"}},
-            {"providers": [
-                {"name": "Cloudflare", "web_hosts": ["cloudflare.net"], "web_headers": [{"name": "server", "contains": "cloudflare"}]},
-                {"name": "nginx", "web_headers": [{"name": "x-powered-by", "contains": "nginx"}]},
-            ]},
-        )
-        by_name = {item["name"]: item for item in clues}
-        self.assertEqual(by_name["Cloudflare"]["observed_hosts"], ["edge.cloudflare.net"])
-        self.assertEqual(by_name["Cloudflare"]["observed_headers"][0]["name"], "server")
-        self.assertEqual(by_name["nginx"]["observed_headers"][0]["value"], "nginx")
 
     def test_normalized_domain_has_effective_dmarc_source_and_signals(self):
         result = normalize_domain_result(
@@ -298,10 +284,14 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(first["source"]["au_entry_count"], 2)
             self.assertEqual([item["domain"] for item in first["domains"]], ["example.com.au", "service.example.au"])
             self.assertEqual(first["summary"]["dmarc_policies"]["reject"], 2)
+            self.assertEqual(first["schema_version"], 5)
             index = json.loads((output / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(len(index["snapshots"]), 2)
             self.assertIn("20261005", index["latest"])
             self.assertTrue((output / index["latest"]).exists())
+            self.assertTrue(index["latest"].endswith(".json.gz"))
+            with gzip.open(output / index["latest"], "rt", encoding="utf-8") as snapshot_file:
+                self.assertEqual(json.load(snapshot_file)["schema_version"], 5)
             raw_archive = output / index["snapshots"][0]["raw_archive"]
             self.assertTrue(raw_archive.exists())
 
@@ -322,103 +312,66 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["domains"][0]["dmarc"]["status"], "lookup_error")
         self.assertEqual(snapshot["summary"]["spf"]["lookup_error"], 1)
 
-    def test_evidence_objects_are_deduplicated_and_raw_rows_keep_only_references(self):
-        import base64
-        import hashlib
-
-        security_body = b"Contact: mailto:security@example.au\nExpires: 2027-09-29T00:00:00Z\n"
-        security_hash = hashlib.sha256(security_body).hexdigest()
-        certificate_hash = "a" * 64
-        certificate_metadata = {
-            "sha256_fingerprint": certificate_hash,
-            "subject": "CN=example.au",
-            "issuer": "CN=CA",
-            "subject_alt_names": [{"type": "DNSName", "value": "example.au"}],
-            "not_before": "2026-01-01T00:00:00Z",
-            "not_after": "2027-01-01T00:00:00Z",
+    def test_no_raw_web_or_certificate_data_is_written(self):
+        body = "Contact: mailto:private@example.au"
+        checker = lambda _: {
+            "checkdmarc": {
+                "spf": {"record": "v=spf1 -all", "valid": True, "parsed": {"all": "fail"}},
+                "nested_vendor_extension": {"certificate_objects": {"a" * 64: {"subject": "CN=secret"}}},
+            },
+            "security_txt": {
+                "availability": "present", "content_validity": "invalid", "tls_certificate": "valid",
+                "request": {"attempts": [{"hops": [{"headers": {"server": "example"}}]}]},
+                "validation": {"contact_present": True, "reasons": ["expires_missing"]},
+            },
+            "web": {"homepage_body": body, "certificate": {"subject": "CN=secret"}},
+            "certificate_objects": {"a" * 64: {"subject": "CN=secret"}},
         }
-        def checker(_domain):
-            return {
-                "checkdmarc": {"spf": {"record": "v=spf1 -all", "valid": True, "parsed": {"all": "fail"}}},
-                "web": {
-                    "security_txt": {
-                        "status": "present", "validity_status": "valid", "sha256": security_hash,
-                        "preferred_scheme": "https", "resources": [{"path": "/.well-known/security.txt", "sha256": security_hash}],
-                    },
-                    "tls": {"status": "valid", "certificates": [{"status": "valid", "sha256_fingerprint": certificate_hash, "days_until_expiry_at_scan": 94.0}]},
-                    "security_txt_objects": {security_hash: base64.b64encode(security_body).decode("ascii")},
-                    "certificate_objects": {certificate_hash: certificate_metadata},
-                },
-            }
-
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp)
             snapshot = write_snapshot(
-                output,
-                "ABC12",
-                2,
-                [{"rank": 1, "domain": "one.example.au"}, {"rank": 2, "domain": "two.example.au"}],
-                checker,
-                PROVIDERS,
-                dt.datetime(2026, 9, 29, tzinfo=dt.timezone.utc),
-                0,
+                output, "ABC12", 1, [{"rank": 1, "domain": "one.example.au"}], checker,
+                PROVIDERS, dt.datetime(2026, 9, 29, tzinfo=dt.timezone.utc), 0,
             )
-            self.assertEqual((output / "security-txt" / f"{security_hash}.txt").read_bytes(), security_body)
-            self.assertEqual(json.loads((output / "certificates" / f"{certificate_hash}.json").read_text()), certificate_metadata)
-            self.assertEqual(len(list((output / "security-txt").glob("*.txt"))), 1)
-            self.assertEqual(len(list((output / "certificates").glob("*.json"))), 1)
-            self.assertEqual(snapshot["domains"][0]["security_txt"]["sha256"], security_hash)
-            self.assertEqual(snapshot["domains"][0]["web"]["tls"]["certificates"][0]["sha256_fingerprint"], certificate_hash)
-            self.assertNotIn("security_txt_objects", snapshot["domains"][0]["web"])
+            domain = snapshot["domains"][0]
+            self.assertEqual(domain["security_txt"]["availability"], "present")
+            self.assertEqual(domain["spf"]["record"], "v=spf1 -all")
+            self.assertNotIn("web", domain)
+            self.assertNotIn("web_dns", domain)
+            serialized_snapshot = json.dumps(snapshot).lower()
+            for detail in ("fingerprint", "subject_alt_names", "not_after", "certificate_objects", "homepage_body"):
+                self.assertNotIn(detail, serialized_snapshot)
             with gzip.open(output / snapshot["raw_archive"], "rt", encoding="utf-8") as stream:
                 raw_text = stream.read()
-            self.assertNotIn("security_txt_objects", raw_text)
-            self.assertNotIn("certificate_objects", raw_text)
-            self.assertNotIn(base64.b64encode(security_body).decode("ascii"), raw_text)
-            self.assertNotIn(security_body.decode("ascii"), raw_text)
-            self.assertNotIn("CN=example.au", raw_text)
-            self.assertIn(security_hash, raw_text)
-            self.assertIn(certificate_hash, raw_text)
+            self.assertIn("v=spf1 -all", raw_text)
+            self.assertNotIn("security_txt", raw_text)
+            self.assertNotIn("homepage_body", raw_text)
+            self.assertNotIn(body, raw_text)
+            self.assertNotIn("CN=secret", raw_text)
+            self.assertFalse((output / "security-txt").exists())
+            self.assertFalse((output / "certificates").exists())
 
     def test_per_field_size_report_includes_normalized_and_raw_fields(self):
         report = field_size_report(
-            {"generated_at": "now", "domains": [{"spf": {"record": "x"}, "web": {"title": "y"}}]},
+            {"generated_at": "now", "domains": [{"spf": {"record": "x"}, "security_txt": {"availability": "present"}}]},
             [{"raw": {"spf": "x"}, "domain": "example.au"}],
         )
         self.assertIn("domains.spf", report)
-        self.assertIn("domains.web", report)
+        self.assertIn("domains.security_txt", report)
         self.assertIn("raw.raw", report)
         self.assertGreater(report["domains.spf"]["serialized_bytes"], 0)
         self.assertGreater(report["raw.raw"]["gzip_bytes"], 0)
 
-    def test_changed_security_txt_body_is_retained_as_a_new_hash_object(self):
-        import base64
-        import hashlib
-
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp)
-            for index, body in enumerate((b"Contact: mailto:a@example.au\n", b"Contact: mailto:b@example.au\n"), start=1):
-                digest = hashlib.sha256(body).hexdigest()
-                def checker(_domain):
-                    return {
-                        "web": {
-                            "security_txt": {"status": "present", "validity_status": "invalid", "sha256": digest, "resources": [{"sha256": digest}]},
-                            "security_txt_objects": {digest: base64.b64encode(body).decode("ascii")},
-                        },
-                    }
+    def test_compressed_file_guard_stops_oversized_generated_output(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp, patch("collector.scan.MAX_GENERATED_FILE_BYTES", 1):
+            with self.assertRaises(ScanError) as raised:
                 write_snapshot(
-                    output,
-                    f"ABC1{index}",
-                    1,
-                    [{"rank": 1, "domain": "example.au"}],
-                    checker,
-                    PROVIDERS,
-                    dt.datetime(2026, 10, index, tzinfo=dt.timezone.utc),
-                    0,
+                    Path(temp), "ABC12", 1, [{"rank": 1, "domain": "example.au"}],
+                    lambda _: {"spf": {"record": "v=spf1 -all", "valid": True}},
+                    PROVIDERS, dt.datetime(2026, 9, 29, tzinfo=dt.timezone.utc), 0,
                 )
-            hashes = {hashlib.sha256(path.read_bytes()).hexdigest() for path in (output / "security-txt").glob("*.txt")}
-            self.assertEqual(len(hashes), 2)
-            self.assertEqual(len(list((output / "security-txt").glob("*.txt"))), 2)
+            self.assertIn("per-file guard", str(raised.exception))
 
     def test_merge_requires_every_shard_and_keeps_latest_retry_attempt(self):
         prepared = {

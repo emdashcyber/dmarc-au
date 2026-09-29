@@ -5,28 +5,19 @@
       "name": "Google Workspace",
       "outbound": ["_spf.google.com", "_spf.googlemail.com"],
       "inbound": ["aspmx.l.google.com", "googlemail.com"],
-      "reporting": [],
-      "web_name": "Google web hosting",
-      "web_hosts": ["googlehosted.com", "googleusercontent.com", "ghs.googlehosted.com"],
-      "web_headers": [{"name": "server", "contains": "gws"}]
+      "reporting": []
     },
     {
       "name": "Microsoft 365",
       "outbound": ["spf.protection.outlook.com", "protection.outlook.com"],
       "inbound": ["mail.protection.outlook.com"],
-      "reporting": [],
-      "web_name": "Microsoft Azure",
-      "web_hosts": ["azurewebsites.net", "azurefd.net", "trafficmanager.net"],
-      "web_headers": [{"name": "server", "contains": "microsoft-iis"}]
+      "reporting": []
     },
     {
       "name": "Amazon SES",
-      "web_name": "Amazon Web Services",
       "outbound": ["amazonses.com"],
       "inbound": [],
-      "reporting": [],
-      "web_hosts": ["cloudfront.net", "amazonaws.com"],
-      "web_headers": [{"name": "via", "contains": "cloudfront"}, {"name": "server", "contains": "amazons3"}]
+      "reporting": []
     },
     {
       "name": "SendGrid",
@@ -111,57 +102,6 @@
       "outbound": [],
       "inbound": [],
       "reporting": ["uriports.com", "report-uri.com"]
-    },
-    {
-      "name": "Fastly",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_hosts": ["fastly.net"],
-      "web_headers": [{"name": "via", "contains": "varnish"}, {"name": "x-served-by", "contains": "cache-"}]
-    },
-    {
-      "name": "Cloudflare",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_hosts": ["cloudflare.net", "pages.dev", "cfargotunnel.com"],
-      "web_headers": [{"name": "server", "contains": "cloudflare"}, {"name": "cf-ray"}]
-    },
-    {
-      "name": "Akamai",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_hosts": ["akamaized.net", "akamai.net", "edgesuite.net", "edgekey.net"],
-      "web_headers": [{"name": "server", "contains": "akamaighost"}]
-    },
-    {
-      "name": "Vercel",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_hosts": ["vercel.app", "vercel-dns.com"],
-      "web_headers": [{"name": "x-vercel-id"}]
-    },
-    {
-      "name": "Netlify",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_hosts": ["netlify.app", "netlify.global"],
-      "web_headers": [{"name": "server", "contains": "netlify"}, {"name": "x-nf-request-id"}]
-    },
-    {
-      "name": "GitHub Pages",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_hosts": ["github.io"],
-      "web_headers": [{"name": "server", "contains": "github.com"}]
-    },
-    {
-      "name": "nginx",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_headers": [{"name": "server", "contains": "nginx"}]
-    },
-    {
-      "name": "Apache HTTP Server",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_headers": [{"name": "server", "contains": "apache"}]
-    },
-    {
-      "name": "LiteSpeed",
-      "outbound": [], "inbound": [], "reporting": [],
-      "web_headers": [{"name": "server", "contains": "litespeed"}]
     },
     {
       "name": "OnDMARC",

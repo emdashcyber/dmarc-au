@@ -3,12 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="Explore email, web, certificate, and DNS security posture for tracked .au domains."
-    />
+    <meta name="description" content="Explore SPF, DMARC, and limited security.txt observations for tracked .au domains." />
     <meta name="theme-color" content="#101619" />
-    <title>.au Security Posture Observatory</title>
+    <title>.au Mail Authentication Observatory</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./app.js" defer></script>
@@ -16,32 +13,23 @@
   <body>
     <a class="skip-link" href="#main">Skip to data</a>
     <header class="site-header">
-      <a class="brand" href="./" aria-label=".au Security Posture Observatory home">
+      <a class="brand" href="./" aria-label=".au Mail Authentication Observatory home">
         <span class="brand-mark" aria-hidden="true">AU</span>
         <span class="brand-copy">
-          <strong>AU SECURITY OBSERVATORY</strong>
-          <small>AUSTRALIA · PUBLIC DNS + HTTPS DATA</small>
+          <strong>AU MAIL AUTHENTICATION OBSERVATORY</strong>
+          <small>AUSTRALIA · PUBLIC DNS + LIMITED HTTP DATA</small>
         </span>
       </a>
-      <div class="header-meta">
-        <span class="live-dot" aria-hidden="true"></span>
-        <span id="feed-status" role="status">Loading snapshot…</span>
-      </div>
+      <div class="header-meta"><span class="live-dot" aria-hidden="true"></span><span id="feed-status" role="status">Loading snapshot…</span></div>
     </header>
 
     <main id="main" class="page-shell">
       <section class="hero" aria-labelledby="page-title">
         <div class="hero-copy">
-          <p class="eyebrow"><span class="eyebrow-rule"></span>TRanco top 1,000,000 · tracked .au names</p>
-          <h1 id="page-title">What does the public security posture look like?</h1>
-          <p class="hero-intro">
-            A weekly view of email-authentication records, website security headers,
-            HTTPS certificates, security.txt, DNS records, and DNSSEC for tracked .au domains.
-          </p>
-          <div class="hero-footnote">
-            <span class="source-chip">Weekly snapshot</span>
-            <span id="snapshot-meta">Waiting for the first scan</span>
-          </div>
+          <p class="eyebrow"><span class="eyebrow-rule"></span>TRANCO TOP 1,000,000 · TRACKED .AU NAMES</p>
+          <h1 id="page-title">How are .au domains configured for email?</h1>
+          <p class="hero-intro">Explore SPF, DMARC, mail routing, and DNSSEC findings. A small web sample checks only the well-known security.txt endpoint.</p>
+          <div class="hero-footnote"><span class="source-chip">Weekly snapshot</span><span id="snapshot-meta">Waiting for the first scan</span></div>
         </div>
         <aside class="hero-aside" aria-label="Data source information">
           <div class="aside-number">.au</div>
@@ -49,306 +37,81 @@
             <p class="aside-label">OBSERVATORY SCOPE</p>
             <p class="aside-copy">Exact ranked .au names, including subdomains. Previously ranked names stay tracked after leaving the top million.</p>
           </div>
-          <div class="aside-source">
-            <span>RANK SOURCE</span>
-            <a href="https://tranco-list.eu/" target="_blank" rel="noreferrer">TRANCO ↗</a>
-          </div>
+          <div class="aside-source"><span>RANK SOURCE</span><a href="https://tranco-list.eu/" target="_blank" rel="noreferrer">TRANCO ↗</a></div>
         </aside>
       </section>
 
       <section class="overview" aria-label="Snapshot summary">
         <div class="section-heading">
-          <div>
-            <p class="eyebrow">AT A GLANCE</p>
-            <h2>Posture overview</h2>
-          </div>
-          <div class="snapshot-tools">
-            <label for="snapshot-select">Snapshot</label>
-            <select id="snapshot-select" disabled>
-              <option>Loading…</option>
-            </select>
-          </div>
+          <div><p class="eyebrow">AT A GLANCE</p><h2>Posture overview</h2></div>
+          <div class="snapshot-tools"><label for="snapshot-select">Snapshot</label><select id="snapshot-select" disabled><option>Loading…</option></select></div>
         </div>
-        <div id="metrics" class="metric-grid" aria-live="polite">
-          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
-          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
-          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
-          <div class="metric-card placeholder"><span></span><span></span><span></span></div>
-        </div>
+        <div id="metrics" class="metric-grid" aria-live="polite"></div>
         <div class="chart-grid">
           <article class="chart-card">
-            <div class="chart-heading">
-              <div>
-                <p class="chart-kicker">DMARC</p>
-                <h3>Published policy</h3>
-              </div>
-              <span class="chart-unit">domains</span>
-            </div>
+            <div class="chart-heading"><div><p class="chart-kicker">DMARC</p><h3>Published policy</h3></div><span class="chart-unit">domains</span></div>
             <div id="policy-chart" class="bar-chart" role="img" aria-label="DMARC policy breakdown"></div>
           </article>
           <article class="chart-card history-card">
-            <div class="chart-heading">
-              <div>
-                <p class="chart-kicker">OVER TIME</p>
-                <h3>DMARC enforcement</h3>
-              </div>
-              <span class="chart-unit">reject + quarantine</span>
-            </div>
+            <div class="chart-heading"><div><p class="chart-kicker">OVER TIME</p><h3>DMARC enforcement</h3></div><span class="chart-unit">reject + quarantine</span></div>
             <div id="history-chart" class="history-chart" role="img" aria-label="DMARC enforcement trend"></div>
             <p id="history-caption" class="chart-caption">Historical trend appears after more snapshots are collected.</p>
           </article>
-          <article class="chart-card history-card">
-            <div class="chart-heading">
-              <div>
-                <p class="chart-kicker">WEB POSTURE · OVER TIME</p>
-                <h3>Observed web controls</h3>
-              </div>
-              <span class="chart-unit">valid / present</span>
-            </div>
-            <div id="web-history-chart" class="history-chart" role="img" aria-label="Valid HTTPS certificate and security.txt history"></div>
-            <p id="web-history-caption" class="chart-caption">Web trends appear after snapshots are collected.</p>
-          </article>
           <article class="chart-card signals-card">
-            <div class="chart-heading">
-              <div>
-                <p class="chart-kicker">DNSSEC</p>
-                <h3>DNSSEC chain states</h3>
-              </div>
-              <span class="chart-unit">domains / MX hosts</span>
-            </div>
+            <div class="chart-heading"><div><p class="chart-kicker">DNSSEC</p><h3>Email DNS chain states</h3></div><span class="chart-unit">domains / MX hosts</span></div>
             <div id="signals-chart" class="bar-chart" role="img" aria-label="DNSSEC chain states and MX target DNSSEC findings"></div>
-            <p class="chart-caption">Domain and MX DNSSEC observations are reported independently.</p>
+          </article>
+          <article class="chart-card">
+            <div class="chart-heading"><div><p class="chart-kicker">LIMITED WEB SAMPLE</p><h3>security.txt observations</h3></div><span class="chart-unit">endpoint only</span></div>
+            <div id="web-chart" class="bar-chart" role="img" aria-label="security.txt availability and content validation"></div>
           </article>
         </div>
       </section>
 
       <section class="explorer" aria-labelledby="explorer-title">
         <div class="section-heading explorer-heading">
-          <div>
-            <p class="eyebrow">DOMAIN EXPLORER</p>
-            <h2 id="explorer-title">Inspect domain signals</h2>
-            <p class="section-description">Ranks show global Tranco placement and position within the current .au subset. Open a row to inspect web responses, certificates, DNS records, mail configuration, and parser notes.</p>
+          <div><p class="eyebrow">DOMAIN EXPLORER</p><h2 id="explorer-title">Inspect domain signals</h2>
+            <p class="section-description">Ranks show global Tranco placement and position within the current .au subset. Open a row for email evidence and the limited security.txt request observations.</p>
           </div>
           <div class="download-actions">
             <button id="download-json" class="button button-secondary" type="button" disabled>Download JSON</button>
             <button id="download-csv" class="button button-primary" type="button" disabled>Download filtered CSV</button>
-            <a id="download-raw" class="button button-secondary" href="#" download hidden>Raw JSONL.GZ</a>
+            <a id="download-raw" class="button button-secondary" href="#" download hidden>Raw email JSONL.GZ</a>
           </div>
         </div>
 
         <div class="filter-panel">
-          <div class="filter-search">
-            <label for="search-input">Search domains or providers</label>
-            <input id="search-input" type="search" placeholder="Try example.com.au, Google Workspace…" autocomplete="off" />
-          </div>
-          <div class="filter-select">
-            <label for="rank-filter">Tranco placement</label>
-            <select id="rank-filter">
-              <option value="all">All tracked names</option>
-              <option value="in_top_1m">In top 1M</option>
-              <option value="outside_top_1m">Outside top 1M</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="spf-filter">SPF record</label>
-            <select id="spf-filter">
-              <option value="all">Any status</option>
-              <option value="present_valid">Valid</option>
-              <option value="present_invalid">Invalid</option>
-              <option value="absent">No record</option>
-              <option value="lookup_error">Lookup error</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="spf-qualifier-filter">SPF ending</label>
-            <select id="spf-qualifier-filter">
-              <option value="all">Any ending</option>
-              <option value="fail">Hard fail · -all</option>
-              <option value="softfail">Softfail · ~all</option>
-              <option value="neutral">Neutral · ?all / implicit</option>
-              <option value="pass">Pass · +all</option>
-              <option value="implicit">No explicit all</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="dmarc-filter">DMARC policy</label>
-            <select id="dmarc-filter">
-              <option value="all">Any policy</option>
-              <option value="reject">Reject</option>
-              <option value="quarantine">Quarantine</option>
-              <option value="none">None · monitor</option>
-              <option value="absent">No record</option>
-              <option value="present_invalid">Invalid</option>
-              <option value="lookup_error">Lookup error</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="provider-filter">Likely service</label>
-            <select id="provider-filter" disabled>
-              <option value="all">Any service</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="dnssec-filter">DNSSEC chain</label>
-            <select id="dnssec-filter">
-              <option value="all">Any state</option>
-              <option value="secure">Secure</option>
-              <option value="unsigned">Unsigned</option>
-              <option value="broken">Broken</option>
-              <option value="lookup_error">Lookup error</option>
-              <option value="unknown">Unknown</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="https-filter">HTTPS certificate</label>
-            <select id="https-filter">
-              <option value="all">Any state</option>
-              <option value="valid">Valid</option>
-              <option value="certificate_expired">Expired</option>
-              <option value="certificate_name_mismatch">Name mismatch</option>
-              <option value="certificate_untrusted">Untrusted</option>
-              <option value="certificate_not_yet_valid">Not yet valid</option>
-              <option value="tls_error">TLS error</option>
-              <option value="lookup_error">Connection error</option>
-              <option value="request_error">Request error</option>
-              <option value="blocked_destination">Blocked redirect target</option>
-              <option value="redirect_limit">Redirect limit</option>
-              <option value="unavailable">Unavailable</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="securitytxt-filter">security.txt</label>
-            <select id="securitytxt-filter">
-              <option value="all">Any state</option>
-              <option value="present">Present</option>
-              <option value="absent">Absent</option>
-              <option value="lookup_error">Lookup error</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="securitytxt-validity-filter">security.txt validity</label>
-            <select id="securitytxt-validity-filter">
-              <option value="all">Any validity</option>
-              <option value="valid">Valid</option>
-              <option value="expired">Expired</option>
-              <option value="invalid">Invalid</option>
-              <option value="insecure_transport">Insecure transport</option>
-              <option value="lookup_error">Lookup error</option>
-              <option value="absent">No file found</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="hsts-filter">HSTS</label>
-            <select id="hsts-filter">
-              <option value="all">Any state</option>
-              <option value="active">Active</option>
-              <option value="inactive">Missing or inactive</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="caa-filter">CAA policy</label>
-            <select id="caa-filter">
-              <option value="all">Any state</option>
-              <option value="present">Effective record found</option>
-              <option value="absent">No record found</option>
-              <option value="lookup_error">Lookup error</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="ipv6-filter">IPv6</label>
-            <select id="ipv6-filter">
-              <option value="all">Any state</option>
-              <option value="present">AAAA record found</option>
-              <option value="absent">No AAAA record</option>
-              <option value="lookup_error">Lookup error</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="web-dns-filter">Web DNS records</label>
-            <select id="web-dns-filter">
-              <option value="all">Any web DNS</option>
-              <option value="a">A record</option>
-              <option value="aaaa">AAAA record</option>
-              <option value="cname">CNAME record</option>
-              <option value="https">HTTPS / SVCB record</option>
-            </select>
-          </div>
-          <div class="filter-select">
-            <label for="header-filter">Security header</label>
-            <select id="header-filter">
-              <option value="all">Any header</option>
-              <option value="content-security-policy">Content-Security-Policy</option>
-              <option value="strict-transport-security">Strict-Transport-Security</option>
-              <option value="x-frame-options">X-Frame-Options</option>
-              <option value="x-content-type-options">X-Content-Type-Options</option>
-              <option value="referrer-policy">Referrer-Policy</option>
-              <option value="permissions-policy">Permissions-Policy</option>
-              <option value="cross-origin-opener-policy">COOP</option>
-              <option value="cross-origin-embedder-policy">COEP</option>
-              <option value="cross-origin-resource-policy">CORP</option>
-              <option value="access-control-allow-origin">CORS origin</option>
-            </select>
-          </div>
+          <div class="filter-search"><label for="search-input">Search domains or mail services</label><input id="search-input" type="search" placeholder="Try example.com.au, Google Workspace…" autocomplete="off" /></div>
+          <div class="filter-select"><label for="rank-filter">Tranco placement</label><select id="rank-filter"><option value="all">All tracked names</option><option value="in_top_1m">In top 1M</option><option value="outside_top_1m">Outside top 1M</option></select></div>
+          <div class="filter-select"><label for="spf-filter">SPF record</label><select id="spf-filter"><option value="all">Any status</option><option value="present_valid">Valid</option><option value="present_invalid">Invalid</option><option value="absent">No record</option><option value="lookup_error">Lookup error</option></select></div>
+          <div class="filter-select"><label for="spf-qualifier-filter">SPF ending</label><select id="spf-qualifier-filter"><option value="all">Any ending</option><option value="fail">Hard fail · -all</option><option value="softfail">Softfail · ~all</option><option value="neutral">Neutral · ?all / implicit</option><option value="pass">Pass · +all</option><option value="implicit">No explicit all</option></select></div>
+          <div class="filter-select"><label for="dmarc-filter">DMARC</label><select id="dmarc-filter"><option value="all">Any policy</option><option value="reject">Reject</option><option value="quarantine">Quarantine</option><option value="none">None · monitor</option><option value="absent">No record</option><option value="present_invalid">Invalid</option><option value="lookup_error">Lookup error</option></select></div>
+          <div class="filter-select"><label for="provider-filter">Likely mail service</label><select id="provider-filter"><option value="all">Any service</option></select></div>
+          <div class="filter-select"><label for="dnssec-filter">DNSSEC chain</label><select id="dnssec-filter"><option value="all">Any state</option><option value="secure">Secure</option><option value="unsigned">Unsigned</option><option value="broken">Broken</option><option value="lookup_error">Lookup error</option><option value="unknown">Unknown</option></select></div>
+          <div class="filter-select"><label for="securitytxt-filter">security.txt availability</label><select id="securitytxt-filter"><option value="all">Any state</option><option value="present">Present</option><option value="absent">Absent</option><option value="http_error">HTTP error</option><option value="lookup_error">Lookup error</option></select></div>
+          <div class="filter-select"><label for="content-validity-filter">security.txt content</label><select id="content-validity-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="not_assessable">Not assessable</option></select></div>
+          <div class="filter-select"><label for="tls-filter">Endpoint certificate</label><select id="tls-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="error">TLS error</option><option value="not_observed">Not observed</option></select></div>
         </div>
 
-        <div class="table-toolbar">
-          <p id="result-count" aria-live="polite">Loading domains…</p>
-          <div class="pagination" aria-label="Table pages">
-            <button id="previous-page" class="page-button" type="button" aria-label="Previous page" disabled>←</button>
-            <span id="page-label">Page 1</span>
-            <button id="next-page" class="page-button" type="button" aria-label="Next page" disabled>→</button>
-          </div>
-        </div>
-
+        <div class="table-toolbar"><p id="result-count" aria-live="polite">Loading domains…</p><div class="pagination" aria-label="Table pages"><button id="previous-page" class="page-button" type="button" aria-label="Previous page" disabled>←</button><span id="page-label">Page 1</span><button id="next-page" class="page-button" type="button" aria-label="Next page" disabled>→</button></div></div>
         <div class="table-wrap">
           <table>
-            <thead>
-              <tr>
-                <th scope="col" class="rank-col">TRANCO / .AU</th>
-                <th scope="col">DOMAIN</th>
-                <th scope="col">SPF</th>
-                <th scope="col">DMARC</th>
-                <th scope="col">HTTPS</th>
-                <th scope="col">SECURITY.TXT</th>
-                <th scope="col">WEB DNS</th>
-                <th scope="col">LIKELY SERVICES</th>
-                <th scope="col">MAIL ROUTING</th>
-                <th scope="col">EXTRAS</th>
-              </tr>
-            </thead>
-            <tbody id="domain-rows">
-              <tr><td colspan="10" class="empty-cell">Loading the public security snapshot…</td></tr>
-            </tbody>
+            <thead><tr><th scope="col" class="rank-col">TRANCO / .AU</th><th scope="col">DOMAIN</th><th scope="col">SPF</th><th scope="col">DMARC</th><th scope="col">SECURITY.TXT ENDPOINT</th><th scope="col">LIKELY MAIL SERVICES</th><th scope="col">MAIL ROUTING</th><th scope="col">EMAIL EXTRAS</th></tr></thead>
+            <tbody id="domain-rows"><tr><td colspan="8" class="empty-cell">Loading the public snapshot…</td></tr></tbody>
           </table>
         </div>
-        <div id="empty-state" class="empty-state" hidden>
-          <div class="empty-icon" aria-hidden="true">∅</div>
-          <h3>No scan data yet</h3>
-          <p>Run the <code>Refresh .au security data and publish Pages</code> workflow from the Actions tab to create the first snapshot.</p>
-        </div>
+        <div id="empty-state" class="empty-state" hidden><div class="empty-icon" aria-hidden="true">∅</div><h3>No scan data yet</h3><p>Run the <code>Refresh .au security data and publish Pages</code> workflow from the Actions tab to create the first snapshot.</p></div>
         <div id="error-state" class="error-state" role="alert" hidden></div>
       </section>
 
       <section class="methodology" aria-labelledby="method-title">
         <div class="method-mark" aria-hidden="true">i</div>
-        <div>
-          <p class="eyebrow">HOW TO READ THIS DATA</p>
-          <h2 id="method-title">Published signals describe configuration at scan time.</h2>
-          <p>
-            SPF and DMARC show published email policies. Website headers, TLS certificate details, HTTPS redirects, and the well-known security.txt path are sampled with bounded public GET and HEAD requests. Security evidence files are content-addressed and snapshots reference their SHA-256 hashes. DNSSEC distinguishes secure, unsigned, broken, and lookup-error results. Provider names are clues inferred from published hostnames and headers.
-          </p>
+        <div><p class="eyebrow">HOW TO READ THIS DATA</p><h2 id="method-title">Published signals describe configuration at scan time.</h2>
+          <p>SPF, DMARC, mail routing, and DNSSEC findings describe published DNS configuration. The web sample makes a GET request only to <code>/.well-known/security.txt</code>, first over HTTP and then over HTTPS only if HTTP fails before returning a response. Headers, redirects, and certificate validity refer only to that request path. Response bodies and certificate details are processed in memory and discarded.</p>
         </div>
-        <div class="method-links">
-          <a href="https://www.rfc-editor.org/rfc/rfc7208" target="_blank" rel="noreferrer">SPF · RFC 7208 ↗</a>
-          <a href="https://www.rfc-editor.org/rfc/rfc9989" target="_blank" rel="noreferrer">DMARC · RFC 9989 ↗</a>
-          <a href="https://www.rfc-editor.org/rfc/rfc9116" target="_blank" rel="noreferrer">security.txt · RFC 9116 ↗</a>
-        </div>
+        <div class="method-links"><a href="https://www.rfc-editor.org/rfc/rfc7208" target="_blank" rel="noreferrer">SPF · RFC 7208 ↗</a><a href="https://www.rfc-editor.org/rfc/rfc9989" target="_blank" rel="noreferrer">DMARC · RFC 9989 ↗</a><a href="https://www.rfc-editor.org/rfc/rfc9116" target="_blank" rel="noreferrer">security.txt · RFC 9116 ↗</a></div>
       </section>
     </main>
-
-    <footer class="site-footer">
-      <span>OPEN DATA · DNS AT SCAN TIME</span>
-      <span>Built from Tranco rankings, public DNS, and bounded HTTP checks</span>
-    </footer>
+    <footer class="site-footer"><span>OPEN DATA · DNS AT SCAN TIME</span><span>Tranco ranking and bounded public DNS / HTTP checks</span></footer>
   </body>
 </html>

@@ -25,7 +25,7 @@ from collector.scan import (
     normalize_domain,
     publish_snapshot,
 )
-from collector.web_checks import HTTP_TIMEOUT_SECONDS, MAX_PAGE_BYTES, MAX_REDIRECTS, MAX_SECURITY_TXT_BYTES
+from collector.web_checks import HTTP_TIMEOUT_SECONDS, MAX_REDIRECTS, MAX_SECURITY_TXT_BYTES
 
 
 SHARD_FILE = re.compile(r"^shard-(\d+)-attempt-(\d+)\.jsonl\.gz$")
@@ -270,8 +270,6 @@ def merge_scan(
 
     normalized: list[dict[str, Any]] = []
     raw_records: list[dict[str, Any]] = []
-    from collector.scan import _extract_evidence_objects
-
     observed: set[str] = set()
     for shard_index, path in sorted(shards.items()):
         with gzip.open(path, "rt", encoding="utf-8") as stream:
@@ -315,8 +313,6 @@ def merge_scan(
     if set(normalize_domain(str(name)) for name in registry["domains"]) != expected.keys():
         raise ScanError("Candidate registry does not exactly match the prepared tracked domain set")
 
-    security_txt_objects, certificate_objects = _extract_evidence_objects(raw_records)
-
     generated_at = dt.datetime.fromisoformat(str(prepared["generated_at"]).replace("Z", "+00:00"))
     source = prepared["source"]
     snapshot = publish_snapshot(
@@ -335,21 +331,18 @@ def merge_scan(
             "domain_workers_per_shard": DOMAIN_WORKERS_PER_SHARD,
             "delay_seconds": DOMAIN_DELAY_SECONDS,
             "web_probe": {
-                "methods": ["HEAD", "GET"],
-                "schemes": ["http", "https"],
+                "method": "GET",
+                "initial_scheme": "http",
+                "https_fallback": "only after HTTP fails before receiving a response",
                 "request_chain_deadline_seconds": HTTP_TIMEOUT_SECONDS,
                 "max_redirects": MAX_REDIRECTS,
-                "homepage_body_limit_bytes": MAX_PAGE_BYTES,
                 "security_txt_body_limit_bytes": MAX_SECURITY_TXT_BYTES,
                 "security_txt_paths": ["/.well-known/security.txt"],
-                "certificate_diagnostic_handshake": "TLS-only after certificate validation failure",
-                "reuses_captured_a_aaaa_for_initial_hostname": True,
+                "stored_response_body": False,
+                "stored_certificate_metadata": False,
             },
-            "web_dns_record_types": ["A", "AAAA", "CNAME", "CAA", "HTTPS"],
             "roster_policy": "union_of_current_tranco_au_and_prior_registry",
         },
-        security_txt_objects=security_txt_objects,
-        certificate_objects=certificate_objects,
     )
     _write_json(output_dir / "registry.json", registry)
     print(
