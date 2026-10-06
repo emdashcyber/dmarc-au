@@ -171,6 +171,17 @@ h3 { margin-bottom: 0; font: 600 15px var(--display); }
 .history-bar-caa { background: linear-gradient(180deg, #ba92d8, #72558f); }
 .history-point[data-latest="true"] .history-bar-tls { background: linear-gradient(180deg, #b9dcf4, #5d9dc5); }
 .history-point[data-latest="true"] .history-bar-security { background: linear-gradient(180deg, var(--gold-light), #b88236); }
+.spf-history-chart { min-height: 125px; display: flex; align-items: end; gap: 6px; border-bottom: 1px solid var(--line); }
+.spf-history-point { min-width: 8px; }
+.spf-history-stack { width: min(34px, 88%); height: 106px; display: flex; flex-direction: column-reverse; overflow: hidden; border-radius: 3px 3px 0 0; background: #101719; }
+.spf-history-segment { width: 100%; min-height: 0; flex: 0 0 auto; }
+.spf-hardfail { background: linear-gradient(180deg, #df806b, #a64943); }
+.spf-softfail { background: linear-gradient(180deg, #e5ba67, #a97d36); }
+.spf-neutral { background: linear-gradient(180deg, #83918e, #566360); }
+.spf-pass { background: linear-gradient(180deg, #70c69d, #318164); }
+.spf-chart-legend { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 7px 14px; color: var(--muted); font-size: 9px; }
+.spf-chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.spf-chart-legend i { width: 8px; height: 8px; display: inline-block; border-radius: 2px; }
 .history-point:hover::after, .history-point:focus-visible::after { content: attr(data-label); position: absolute; z-index: 1; bottom: calc(100% - 4px); left: 50%; padding: 5px 7px; transform: translateX(-50%); border: 1px solid var(--line); border-radius: 3px; background: #0d1315; color: var(--text); white-space: nowrap; font: 9px var(--mono); }
 .chart-caption { margin: 9px 0 0; color: var(--faint); font-size: 10px; }
 

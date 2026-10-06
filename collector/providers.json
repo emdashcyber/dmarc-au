@@ -1,5 +1,5 @@
 {
-  "catalog_version": 1,
+  "catalog_version": 2,
   "providers": [
     {
       "name": "Google Workspace",
@@ -17,6 +17,7 @@
       "name": "Amazon SES",
       "outbound": ["amazonses.com"],
       "inbound": [],
+      "patterns": {"inbound": ["inbound-smtp.*.amazonaws.com"]},
       "reporting": []
     },
     {
@@ -34,6 +35,12 @@
     {
       "name": "Mailchimp",
       "outbound": ["servers.mcsv.net", "mandrillapp.com"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "MailChannels",
+      "outbound": ["relay.mailchannels.net"],
       "inbound": [],
       "reporting": []
     },
@@ -62,6 +69,49 @@
       "reporting": []
     },
     {
+      "name": "Zendesk",
+      "outbound": ["mail.zendesk.com"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Campaign Monitor",
+      "outbound": ["createsend.com"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Zoho Campaigns",
+      "outbound": ["zcsend.net"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Exclaimer",
+      "outbound": [],
+      "inbound": [],
+      "patterns": {"outbound": ["spf.*.exclaimer.net"]},
+      "reporting": []
+    },
+    {
+      "name": "Adobe Marketo",
+      "outbound": ["mktomail.com"],
+      "inbound": [],
+      "reporting": []
+    },
+    {
+      "name": "Cloudflare",
+      "outbound": [],
+      "inbound": ["mx.cloudflare.net"],
+      "reporting": ["dmarc-reports.cloudflare.net"]
+    },
+    {
+      "name": "Hostinger",
+      "outbound": [],
+      "inbound": ["mx1.hostinger.com", "mx2.hostinger.com"],
+      "reporting": []
+    },
+    {
       "name": "Mimecast",
       "outbound": ["mimecast.com"],
       "inbound": ["mimecast.com"],
@@ -69,9 +119,9 @@
     },
     {
       "name": "Proofpoint",
-      "outbound": ["proofpoint.com"],
-      "inbound": ["pphosted.com", "proofpoint.com"],
-      "reporting": []
+      "outbound": ["proofpoint.com", "pphosted.com", "ppe-hosted.com"],
+      "inbound": ["pphosted.com", "ppe-hosted.com", "proofpoint.com"],
+      "reporting": ["emaildefense.proofpoint.com", "pphosted.com"]
     },
     {
       "name": "Barracuda",
@@ -84,6 +134,18 @@
       "outbound": [],
       "inbound": [],
       "reporting": ["dmarcian.com"]
+    },
+    {
+      "name": "DMARC Analyzer",
+      "outbound": [],
+      "inbound": [],
+      "reporting": ["dmarcanalyzer.com"]
+    },
+    {
+      "name": "Valimail",
+      "outbound": [],
+      "inbound": [],
+      "reporting": ["vali.email"]
     },
     {
       "name": "Agari",

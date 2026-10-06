@@ -492,6 +492,17 @@ def _host_matches(host: str, suffix: str) -> bool:
     return bool(host_value and suffix_value and (host_value == suffix_value or host_value.endswith("." + suffix_value)))
 
 
+def _host_pattern_matches(host: str, pattern: str) -> bool:
+    """Match a catalog hostname pattern, where * stands for exactly one label."""
+    host_labels = normalize_domain(host).split(".")
+    pattern_labels = normalize_domain(pattern).split(".")
+    return bool(
+        host_labels
+        and len(host_labels) == len(pattern_labels)
+        and all(expected == "*" or actual == expected for actual, expected in zip(host_labels, pattern_labels))
+    )
+
+
 def infer_provider_clues(
     spf_targets: list[str],
     mx_hosts: list[dict[str, Any]],
@@ -509,17 +520,33 @@ def infer_provider_clues(
     for role, hosts in source_hosts.items():
         matches: dict[str, dict[str, Any]] = {}
         for host in filter(None, (normalize_domain(value) for value in hosts)):
-            best: tuple[int, str] | None = None
+            best: tuple[int, int, str] | None = None
             for provider in providers:
                 if not isinstance(provider, Mapping):
                     continue
                 for suffix in provider.get(role, []) or []:
                     suffix_text = normalize_domain(str(suffix))
                     if _host_matches(host, suffix_text):
-                        candidate = (len(suffix_text), str(provider.get("name") or "Unknown"))
-                        if best is None or candidate[0] > best[0]:
+                        candidate = (
+                            len(suffix_text.split(".")),
+                            len(suffix_text),
+                            str(provider.get("name") or "Unknown"),
+                        )
+                        if best is None or candidate[:2] > best[:2]:
                             best = candidate
-            name = best[1] if best else "Unclassified"
+                patterns = provider.get("patterns", {})
+                for pattern in patterns.get(role, []) if isinstance(patterns, Mapping) else []:
+                    pattern_text = normalize_domain(str(pattern))
+                    if _host_pattern_matches(host, pattern_text):
+                        fixed_labels = [label for label in pattern_text.split(".") if label != "*"]
+                        candidate = (
+                            len(fixed_labels),
+                            sum(len(label) for label in fixed_labels),
+                            str(provider.get("name") or "Unknown"),
+                        )
+                        if best is None or candidate[:2] > best[:2]:
+                            best = candidate
+            name = best[2] if best else "Unclassified"
             entry = matches.setdefault(name, {"name": name, "observed_hosts": []})
             if host not in entry["observed_hosts"]:
                 entry["observed_hosts"].append(host)

@@ -60,8 +60,8 @@ const summary = {
   domain_count: domains.length,
   rank_status: { in_top_1m: 2, outside_top_1m: 1 },
   dmarc: { present_valid: 1, present_invalid: 0, absent: 1, lookup_error: 1 },
-  spf: { present_valid: 1, present_invalid: 0, absent: 1, lookup_error: 1 },
-  dmarc_policies: { reject: 1 }, spf_qualifiers: { fail: 1 },
+  spf: { present_valid: 4, present_invalid: 0, absent: 1, lookup_error: 1 },
+  dmarc_policies: { reject: 1 }, spf_qualifiers: { fail: 2, softfail: 1, neutral: 1, pass: 0 },
   security_txt: { present: 1, absent: 1, lookup_error: 1, http_error: 0 },
   security_txt_content_validity: { valid: 1, invalid: 0, not_assessable: 2 },
   security_txt_freshness: { current: 0, expired: 1, unknown: 2 },
@@ -71,10 +71,11 @@ const summary = {
   mx_dnssec: { secure: 1 },
 };
 const currentSnapshot = { schema_version: 5, generated_at: "2026-09-29T00:00:00Z", source: { list_id: "ABC123", au_entry_count: 2 }, raw_archive: "raw/current.jsonl.gz", summary, domains };
-const oldSnapshot = { ...currentSnapshot, generated_at: "2026-09-22T00:00:00Z", domains: domains.slice(0, 1), summary: { ...summary, domain_count: 1 } };
+const oldSummary = { ...summary, domain_count: 1, spf: { ...summary.spf, present_valid: 5 }, spf_qualifiers: { fail: 1, softfail: 2, neutral: 1, pass: 1 } };
+const oldSnapshot = { ...currentSnapshot, generated_at: "2026-09-22T00:00:00Z", domains: domains.slice(0, 1), summary: oldSummary };
 const entries = [
   { id: "current", path: "snapshots/current.json.gz", raw_archive: "raw/current.jsonl.gz", generated_at: currentSnapshot.generated_at, domain_count: domains.length, summary },
-  { id: "old", path: "snapshots/old.json.gz", raw_archive: "raw/old.jsonl.gz", generated_at: oldSnapshot.generated_at, domain_count: 1, summary: oldSnapshot.summary },
+  { id: "old", path: "snapshots/old.json.gz", raw_archive: "raw/old.jsonl.gz", generated_at: oldSnapshot.generated_at, domain_count: 1, summary: oldSummary },
 ];
 const index = { schema_version: 5, latest: entries[0].path, snapshots: entries };
 
@@ -115,6 +116,15 @@ async function main() {
   assert.equal(rows().length, 3);
   assert.equal(elements.get("metrics").children.length, 8);
   assert.ok(fetchCalls.some((url) => url.endsWith("current.json.gz")));
+  const spfPoints = elements.get("spf-history-chart").children;
+  assert.equal(spfPoints.length, 2);
+  const latestSpfPoint = spfPoints.at(-1);
+  const latestSegments = latestSpfPoint.children[0].children;
+  assert.deepEqual(latestSegments.map((segment) => segment.dataset.outcome), ["fail", "softfail", "neutral", "pass"]);
+  assert.deepEqual(latestSegments.map((segment) => segment.style.height), ["50%", "25%", "25%", "0%"]);
+  assert.match(latestSpfPoint.dataset.label, /4 valid SPF records/);
+  assert.match(latestSpfPoint.dataset.label, /Hardfail \(−all\): 2 \(50%\)/);
+  assert.match(elements.get("spf-history-caption").textContent, /absent, invalid, and lookup-error records are excluded/);
 
   const filters = [
     ["rank-filter", "outside_top_1m"], ["provider-filter", "Microsoft 365"], ["tls-filter", "valid"],
@@ -147,7 +157,7 @@ async function main() {
   const allText = (node) => [node.textContent, ...node.children.flatMap(allText)].join(" ");
   const detailText = allText(detailRow);
   assert.match(detailText, /v=spf1 -all/);
-  assert.match(detailText, /security\.txt endpoint observations/);
+  assert.match(detailText, /Root HEAD and security\.txt/);
   assert.match(detailText, /present_unverified|signature_status/);
   assert.doesNotMatch(detailText.toLowerCase(), /fingerprint|subject_alt_names|certificate metadata/);
 

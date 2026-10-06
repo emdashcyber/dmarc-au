@@ -143,6 +143,7 @@
       { label: "HTTPS response observed", value: Number(summary.security_txt_https_responses || 0), tone: "quarantine" },
     ], "Root HTTP HEAD upgrade behavior and security.txt endpoint findings");
     drawHistoryChart();
+    drawSpfHistoryChart();
   }
 
   function drawHistoryChart() {
@@ -171,6 +172,58 @@
       target.append(point);
     }
     caption.textContent = `Showing the latest ${count(visible.length)} of ${count(history.length)} scan snapshots.`;
+  }
+
+  function drawSpfHistoryChart() {
+    const target = byId("spf-history-chart");
+    target.replaceChildren();
+    const caption = byId("spf-history-caption");
+    const history = safeArray(state.index && state.index.snapshots).slice().sort((a, b) => new Date(a.generated_at) - new Date(b.generated_at));
+    if (history.length < 2) {
+      caption.textContent = "SPF policy history appears after more snapshots are collected.";
+      return;
+    }
+    const visible = history.slice(-52);
+    const categories = [
+      { key: "fail", label: "Hardfail (−all)", className: "spf-hardfail" },
+      { key: "softfail", label: "Softfail (~all)", className: "spf-softfail" },
+      { key: "neutral", label: "Neutral / implicit (?all or no terminal all)", className: "spf-neutral" },
+      { key: "pass", label: "Pass (+all or all)", className: "spf-pass" },
+    ];
+    for (let index = 0; index < visible.length; index += 1) {
+      const item = visible[index];
+      const summary = object(item.summary);
+      const denominator = Number(object(summary.spf).present_valid || 0);
+      const outcomes = object(summary.spf_qualifiers);
+      const point = el("div", "history-point spf-history-point");
+      point.tabIndex = 0;
+      point.setAttribute("role", "listitem");
+      point.dataset.latest = String(index === visible.length - 1);
+      const details = categories.map((category) => {
+        const value = Number(outcomes[category.key] || 0);
+        const percent = denominator ? Math.round((value / denominator) * 1000) / 10 : 0;
+        return `${category.label}: ${count(value)} (${percent}%)`;
+      });
+      const label = `${dateLabel(item.generated_at)} · ${count(denominator)} valid SPF records · ${details.join(" · ")}`;
+      point.dataset.label = label;
+      point.setAttribute("aria-label", label);
+      point.setAttribute("title", label);
+      const stack = el("div", "spf-history-stack");
+      stack.setAttribute("aria-hidden", "true");
+      for (const category of categories) {
+        const value = Number(outcomes[category.key] || 0);
+        const percent = denominator ? (value / denominator) * 100 : 0;
+        const segment = el("span", `spf-history-segment ${category.className}`);
+        segment.style.height = `${percent}%`;
+        segment.dataset.outcome = category.key;
+        segment.dataset.count = String(value);
+        segment.dataset.share = String(percent);
+        stack.append(segment);
+      }
+      point.append(stack);
+      target.append(point);
+    }
+    caption.textContent = `Shares among valid SPF records only; absent, invalid, and lookup-error records are excluded. Hover or focus a column for its counts and percentages. Showing ${count(visible.length)} of ${count(history.length)} snapshots.`;
   }
 
   function setSnapshotMeta(snapshot) {
@@ -648,12 +701,15 @@
       state.index = await response.json();
       if (state.index.schema_version !== 5) throw new Error(`Unsupported data index schema ${state.index.schema_version}`);
       drawHistoryChart();
+      drawSpfHistoryChart();
       fillSnapshotSelector();
       const snapshots = safeArray(state.index.snapshots).slice().sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at));
       if (!snapshots.length) {
         byId("feed-status").textContent = "NO SCANS YET";
         byId("metrics").replaceChildren();
         byId("policy-chart").textContent = "No scans yet";
+        byId("history-chart").textContent = "No scans yet";
+        byId("spf-history-chart").textContent = "No scans yet";
         byId("signals-chart").textContent = "No scans yet";
         byId("web-chart").textContent = "No scans yet";
         byId("empty-state").hidden = false;

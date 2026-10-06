@@ -11,6 +11,7 @@ from collector.scan import (
     effective_spf_terminal,
     infer_provider_clues,
     is_au_domain,
+    load_provider_catalog,
     normalize_domain_result,
     parse_ranked_csv,
     probe_dnssec,
@@ -123,6 +124,51 @@ class StatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(clues["outbound"][0]["observed_hosts"], ["_spf.google.com"])
         self.assertEqual(clues["inbound"][0]["name"], "Google Workspace")
         self.assertEqual(clues["reporting"][0]["name"], "dmarcian")
+
+    def test_curated_provider_roles_and_regional_pattern_matching(self):
+        catalog = load_provider_catalog(Path(__file__).parents[1] / "collector" / "providers.json")
+        clues = infer_provider_clues(
+            [
+                "mail.zendesk.com", "_spf.createsend.com", "relay.mailchannels.net",
+                "spf.au.exclaimer.net", "spf.au.region.exclaimer.net", "include.mktomail.com", "zcsend.net",
+                "notmail.zendesk.com", "unknown.example.net",
+            ],
+            [
+                {"hostname": "mx1.ppe-hosted.com"},
+                {"hostname": "mx1.hostinger.com"},
+                {"hostname": "inbound-smtp.ap-southeast-2.amazonaws.com"},
+                {"hostname": "inbound-smtp.amazonaws.com"},
+                {"hostname": "mx.cloudflare.net"},
+            ],
+            [
+                "dmarc-reports.cloudflare.net", "rua.emaildefense.proofpoint.com",
+                "vali.email", "reports.dmarcanalyzer.com", "unmapped.example.net",
+            ],
+            catalog,
+        )
+        by_name = lambda role: {item["name"]: item["observed_hosts"] for item in clues[role]}
+        outbound = by_name("outbound")
+        inbound = by_name("inbound")
+        reporting = by_name("reporting")
+        self.assertEqual(outbound["Zendesk"], ["mail.zendesk.com"])
+        self.assertIn("_spf.createsend.com", outbound["Campaign Monitor"])
+        self.assertIn("relay.mailchannels.net", outbound["MailChannels"])
+        self.assertIn("spf.au.exclaimer.net", outbound["Exclaimer"])
+        self.assertIn("spf.au.region.exclaimer.net", outbound["Unclassified"])
+        self.assertIn("include.mktomail.com", outbound["Adobe Marketo"])
+        self.assertIn("zcsend.net", outbound["Zoho Campaigns"])
+        self.assertIn("notmail.zendesk.com", outbound["Unclassified"])
+        self.assertIn("unknown.example.net", outbound["Unclassified"])
+        self.assertIn("mx1.ppe-hosted.com", inbound["Proofpoint"])
+        self.assertIn("mx1.hostinger.com", inbound["Hostinger"])
+        self.assertIn("inbound-smtp.ap-southeast-2.amazonaws.com", inbound["Amazon SES"])
+        self.assertIn("inbound-smtp.amazonaws.com", inbound["Unclassified"])
+        self.assertIn("mx.cloudflare.net", inbound["Cloudflare"])
+        self.assertIn("dmarc-reports.cloudflare.net", reporting["Cloudflare"])
+        self.assertIn("rua.emaildefense.proofpoint.com", reporting["Proofpoint"])
+        self.assertIn("vali.email", reporting["Valimail"])
+        self.assertIn("reports.dmarcanalyzer.com", reporting["DMARC Analyzer"])
+        self.assertIn("unmapped.example.net", reporting["Unclassified"])
 
     def test_normalized_domain_has_effective_dmarc_source_and_signals(self):
         result = normalize_domain_result(

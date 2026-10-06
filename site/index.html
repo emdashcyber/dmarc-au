@@ -57,13 +57,22 @@
             <div id="history-chart" class="history-chart" role="img" aria-label="DMARC enforcement trend"></div>
             <p id="history-caption" class="chart-caption">Historical trend appears after more snapshots are collected.</p>
           </article>
-          <article class="chart-card signals-card">
-            <div class="chart-heading"><div><p class="chart-kicker">DNSSEC</p><h3>Email DNS chain states</h3></div><span class="chart-unit">domains / MX hosts</span></div>
-            <div id="signals-chart" class="bar-chart" role="img" aria-label="DNSSEC chain states and MX target DNSSEC findings"></div>
+          <article class="chart-card history-card spf-history-card">
+            <div class="chart-heading"><div><p class="chart-kicker">OVER TIME</p><h3>SPF terminal policy</h3></div><span class="chart-unit">share of valid SPF</span></div>
+            <div id="spf-history-chart" class="spf-history-chart" role="list" aria-label="Valid SPF terminal-policy shares by scan snapshot"></div>
+            <div class="spf-chart-legend" aria-label="SPF outcome legend">
+              <span><i class="spf-hardfail"></i>Hardfail −all</span><span><i class="spf-softfail"></i>Softfail ~all</span>
+              <span><i class="spf-neutral"></i>Neutral / implicit</span><span><i class="spf-pass"></i>Pass +all</span>
+            </div>
+            <p id="spf-history-caption" class="chart-caption">SPF policy history appears after more snapshots are collected.</p>
           </article>
           <article class="chart-card">
             <div class="chart-heading"><div><p class="chart-kicker">LIMITED WEB SAMPLE</p><h3>security.txt observations</h3></div><span class="chart-unit">endpoint only</span></div>
             <div id="web-chart" class="bar-chart" role="img" aria-label="security.txt availability and content validation"></div>
+          </article>
+          <article class="chart-card signals-card">
+            <div class="chart-heading"><div><p class="chart-kicker">DNSSEC</p><h3>Email DNS chain states</h3></div><span class="chart-unit">domains / MX hosts</span></div>
+            <div id="signals-chart" class="bar-chart" role="img" aria-label="DNSSEC chain states and MX target DNSSEC findings"></div>
           </article>
         </div>
       </section>
@@ -109,6 +118,7 @@
         <div class="method-mark" aria-hidden="true">i</div>
         <div><p class="eyebrow">HOW TO READ THIS DATA</p><h2 id="method-title">Published signals describe configuration at scan time.</h2>
           <p>SPF, DMARC, mail routing, and DNSSEC findings describe published DNS configuration. Before the security.txt request, the collector makes a bodyless HTTP <code>HEAD /</code>, follows redirects, and records whether that response chain upgrades to HTTPS, plus selected server and security headers including HSTS. It then GETs only <code>/.well-known/security.txt</code> over HTTP, trying HTTPS only if HTTP fails before returning a response. The HEAD result describes observed redirect behavior; it does not simulate a browser's cached HSTS state. Format validity is separate from expiry freshness, and security.txt redirects and certificate validity are reported independently. Signed-file structure is checked without cryptographic verification. Response bodies and certificate details are processed in memory and discarded.</p>
+          <p>Likely mail services are inferred from role-specific hostname matches: outbound clues use SPF include/redirect targets, inbound clues use MX hosts, and reporting clues use DMARC or TLS-RPT destinations. Unmatched hostnames remain visible as <strong>Unclassified</strong>. These clues describe published configuration; they do not confirm actual message traffic.</p>
         </div>
         <div class="method-links"><a href="https://www.rfc-editor.org/rfc/rfc7208" target="_blank" rel="noreferrer">SPF · RFC 7208 ↗</a><a href="https://www.rfc-editor.org/rfc/rfc9989" target="_blank" rel="noreferrer">DMARC · RFC 9989 ↗</a><a href="https://www.rfc-editor.org/rfc/rfc9116" target="_blank" rel="noreferrer">security.txt · RFC 9116 ↗</a></div>
       </section>
