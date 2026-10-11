@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">EmDash</title>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0b3558"/>
+  <path d="M18 17v30M18 20h20M18 32h15M18 44h20" fill="none" stroke="#70bdff" stroke-width="6" stroke-linecap="round"/>
+  <path d="M43 32h10" fill="none" stroke="#70bdff" stroke-width="6" stroke-linecap="round"/>
+</svg>

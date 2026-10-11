@@ -1,0 +1,14 @@
+{
+  "name": "dmarc-au",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "test": "node --check src/scripts/dashboard.js && node tests/test_dashboard.js"
+  },
+  "dependencies": {
+    "astro": "^7.3.5"
+  }
+}

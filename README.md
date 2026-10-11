@@ -1,6 +1,6 @@
 # .au Mail Authentication Observatory
 
-A weekly snapshot of published email and DNS configuration for exact `.au` names appearing in the Tranco top one million, with a limited check of the well-known `security.txt` endpoint. The static dashboard uses HTML, CSS, and browser-side JavaScript and is published with GitHub Pages.
+A weekly snapshot of published email and DNS configuration for exact `.au` names appearing in the Tranco top one million, with a limited check of the well-known `security.txt` endpoint. The static dashboard is an Astro site (with one browser-side script for the filters, charts and exports) published with GitHub Pages at `https://emdashcyber.com/dmarc-au/`.
 
 The data describes configuration observed at scan time. It does not measure message-level email pass rates, exploitability, or a single site-wide security score. Provider labels are inferences from observed mail-related hostnames and retain the evidence used for each clue.
 
@@ -19,7 +19,7 @@ The **Refresh .au security data and publish Pages** workflow runs Mondays at 03:
 
 Completed shards are uploaded as run artifacts. The merge stage checks that every expected domain appears exactly once, publishes a schema-v5 gzip-compressed JSON snapshot and gzip-compressed JSONL email archive, then writes the updated roster. The plain JSON index stores summaries for trend charts. The collector prints serialized and gzip size estimates by field and stops with a size breakdown if either generated compressed file exceeds 45 MiB. Failed shard jobs can be rerun using successful shard artifacts; there are no per-domain checkpoints. Dated snapshots are retained indefinitely.
 
-The checked-in `site/data/registry.json` and schema-v5 index are empty to start history fresh. No old snapshot is used to seed the roster.
+The checked-in `public/data/registry.json` and schema-v5 index are empty to start history fresh. No old snapshot is used to seed the roster.
 
 ## Run locally
 
@@ -30,10 +30,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m collector.scan
-python -m http.server 8000 --directory site
+npm install
+npm run dev
 ```
 
-Open `http://localhost:8000`. A full collection reads the Tranco top million and checks the ranked `.au` set. `python -m collector.workflow prepare --rank-limit 10` can exercise input preparation against a compatible short Tranco response; it does not bypass full-list validation for normal runs.
+Open `http://localhost:4321/dmarc-au/`. Snapshot data lives in `public/data/` and is copied verbatim into the build. The page is `src/pages/index.astro`, the layout and theme toggle are in `src/layouts/Base.astro`, styles are in `src/styles/global.css`, and the dashboard logic is the plain script `src/scripts/dashboard.js`. `npm run build` writes the site to `dist/`. A full collection reads the Tranco top million and checks the ranked `.au` set. `python -m collector.workflow prepare --rank-limit 10` can exercise input preparation against a compatible short Tranco response; it does not bypass full-list validation for normal runs.
 
 Provider clues use role-specific hostname evidence: outbound clues come from SPF include and redirect targets, inbound clues from MX hosts, and reporting clues from DMARC and TLS-RPT destinations. Catalog suffixes match only on DNS label boundaries; explicitly cataloged regional patterns use `*` for exactly one label. Unknown or ambiguous names remain `Unclassified`, with their observed hostnames retained. These labels describe published configuration, not verified message traffic.
 
@@ -56,12 +57,13 @@ The expanded catalog is intentionally curated from provider documentation. Curre
 
 ## GitHub Pages setup
 
-Push the repository to GitHub and set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**. The workflow publishes site-only pushes without starting a scan. Scheduled/manual runs save the snapshot and roster, then deploy the site in the same run. The workflow declares minimal per-job permissions for artifact reads, snapshot commits, and Pages deployment.
+Push the repository to GitHub and set **Settings → Pages → Build and deployment → Source** to **GitHub Actions**. The site is built with `npm run build` and the `dist/` folder is deployed; Astro's `base` is `/dmarc-au`, so the site is served under the `emdashcyber.com` custom domain at `/dmarc-au/`. The workflow publishes site-only pushes without starting a scan. Scheduled/manual runs save the snapshot and roster, then deploy the site in the same run. The workflow declares minimal per-job permissions for artifact reads, snapshot commits, and Pages deployment.
 
 ## Offline checks
 
 ```sh
 python3 -m unittest discover -s tests -v
-node --check site/app.js
+node --check src/scripts/dashboard.js
 node tests/test_dashboard.js
+npm run build
 ```

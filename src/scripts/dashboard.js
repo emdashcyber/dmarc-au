@@ -4,6 +4,7 @@
   const DATA_BASE_URL = new URL("./data/", document.baseURI);
   const DATA_INDEX_URL = new URL("index.json", DATA_BASE_URL);
   const PAGE_SIZE = 25;
+  const COLUMN_COUNT = 6;
   const state = { index: null, snapshot: null, domains: [], filtered: [], page: 1 };
 
   const byId = (id) => document.getElementById(id);
@@ -94,8 +95,10 @@
     const scale = Math.max(1, ...rows.map((item) => Number(item.value || 0)));
     for (const item of rows) {
       const row = el("div", "bar-row");
+      row.setAttribute("role", "listitem");
       row.append(el("span", "bar-label", item.label));
       const track = el("div", "bar-track");
+      track.setAttribute("aria-hidden", "true");
       const fill = el("div", "bar-fill");
       fill.dataset.tone = item.tone || "none";
       fill.style.width = `${item.value ? Math.max(2, (item.value / scale) * 100) : 0}%`;
@@ -103,6 +106,7 @@
       row.append(track, el("span", "bar-value", count(item.value)));
       target.append(row);
     }
+    target.setAttribute("role", "list");
     target.setAttribute("aria-label", ariaLabel);
   }
 
@@ -144,6 +148,57 @@
     ], "Root HTTP HEAD upgrade behavior and security.txt endpoint findings");
     drawHistoryChart();
     drawSpfHistoryChart();
+    drawFindings(snapshot, drawProviderCharts());
+  }
+
+  function providerTally(role) {
+    const tally = new Map();
+    for (const domain of state.domains) {
+      const names = new Set(safeArray(object(domain.provider_clues)[role]).map((item) => item && item.name).filter(Boolean));
+      for (const name of names) tally.set(name, (tally.get(name) || 0) + 1);
+    }
+    return [...tally.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }
+
+  function drawProviderCharts() {
+    const result = {};
+    for (const [role, targetId, label] of [["inbound", "provider-inbound-chart", "Inbound mail service clues from MX hosts"], ["outbound", "provider-outbound-chart", "Outbound mail service clues from SPF targets"]]) {
+      const tally = providerTally(role);
+      const named = tally.filter(([name]) => name !== "Unclassified");
+      const unclassified = tally.find(([name]) => name === "Unclassified");
+      const rows = named.slice(0, 8).map(([name, value]) => ({ label: name, value, tone: "provider" }));
+      if (unclassified) rows.push({ label: "Unclassified", value: unclassified[1], tone: "none" });
+      if (rows.length) drawBars(targetId, rows, label);
+      else byId(targetId).textContent = "No provider clues in this snapshot";
+      result[role] = named;
+    }
+    return result;
+  }
+
+  function drawFindings(snapshot, providers) {
+    const target = byId("findings-list");
+    target.replaceChildren();
+    const summary = summaryOf(snapshot);
+    const total = Number(summary.domain_count || state.domains.length);
+    if (!total) return;
+    const enforced = policyCount(summary, "reject") + policyCount(summary, "quarantine");
+    const spfValid = statusCount(summary, "spf", "present_valid");
+    const qualifiers = object(summary.spf_qualifiers);
+    const items = [
+      [`${ratio(enforced, total)} enforce DMARC.`, `${count(enforced)} of ${count(total)} tracked names publish p=reject or p=quarantine. ${ratio(policyCount(summary, "none"), total)} only monitor (p=none) and ${ratio(statusCount(summary, "dmarc", "absent"), total)} publish no DMARC record.`],
+      [`${ratio(spfValid, total)} publish a valid SPF record.`, `Among those, ${ratio(Number(qualifiers.fail || 0), spfValid)} end in -all (hard fail) and ${ratio(Number(qualifiers.softfail || 0), spfValid)} in ~all (softfail).`],
+    ];
+    const topInbound = providers && providers.inbound && providers.inbound[0];
+    if (topInbound) items.push([`${topInbound[0]} is the most common inbound mail clue.`, `${count(topInbound[1])} tracked names (${ratio(topInbound[1], total)}) have MX hosts matching it. Clues describe published configuration, not message traffic.`]);
+    items.push(
+      [`${ratio(Number(object(summary.dnssec).secure || 0), total)} have a secure DNSSEC chain.`, "Counted per domain; MX target DNSSEC is reported separately below."],
+      [`${ratio(statusCount(summary, "security_txt", "present"), total)} serve a security.txt file.`, `${count(statusCount(summary, "security_txt_content_validity", "valid"))} of them pass format validation at /.well-known/security.txt.`],
+    );
+    for (const [lead, rest] of items) {
+      const item = el("li");
+      item.append(el("strong", "", lead), ` ${rest}`);
+      target.append(item);
+    }
   }
 
   function drawHistoryChart() {
@@ -166,6 +221,8 @@
       point.tabIndex = 0;
       point.dataset.latest = String(index === visible.length - 1);
       point.dataset.label = `${dateLabel(item.generated_at)} · ${percent}% enforced`;
+      point.setAttribute("role", "listitem");
+      point.setAttribute("aria-label", point.dataset.label);
       const bar = el("div", "history-bar");
       bar.style.height = `${Math.max(2, percent)}%`;
       point.append(bar);
@@ -229,12 +286,12 @@
   function setSnapshotMeta(snapshot) {
     if (!snapshot) {
       byId("snapshot-meta").textContent = "Waiting for the first scan";
-      byId("feed-status").textContent = "NO SCANS YET";
+      byId("feed-status").textContent = "No scans yet";
       return;
     }
     const source = object(snapshot.source);
     byId("snapshot-meta").textContent = `${dateLabel(snapshot.generated_at, true)} · Tranco ${display(source.list_id)} · ${count(source.au_entry_count)} current .au entries`;
-    byId("feed-status").textContent = "LATEST SNAPSHOT LOADED";
+    byId("feed-status").textContent = "Latest snapshot loaded";
   }
 
   function fillSnapshotSelector() {
@@ -458,7 +515,7 @@
   function buildDetails(domain) {
     const row = el("tr", "detail-row");
     const cell = el("td");
-    cell.colSpan = 8;
+    cell.colSpan = COLUMN_COUNT;
     const content = el("div", "detail-content");
     const spf = object(domain.spf);
     const dmarc = object(domain.dmarc);
@@ -554,6 +611,12 @@
     return row;
   }
 
+  function labelled(label) {
+    const cell = el("td");
+    cell.dataset.label = label;
+    return cell;
+  }
+
   function renderTable() {
     const target = byId("domain-rows");
     target.replaceChildren();
@@ -562,32 +625,33 @@
     const start = (state.page - 1) * PAGE_SIZE;
     for (const domain of state.filtered.slice(start, start + PAGE_SIZE)) {
       const row = el("tr", "data-row");
-      const rank = el("td"); rank.append(domainRank(domain));
-      const name = el("td");
+      const rank = labelled("Rank"); rank.append(domainRank(domain));
+      const name = labelled("Domain");
       name.append(el("div", "domain-name", domain.domain));
       name.append(el("div", "domain-meta", object(domain).rank_status === "outside_top_1m" ? "retained outside current top million" : "current Tranco entry"));
       const toggle = el("button", "detail-toggle", "Inspect findings");
       toggle.type = "button";
+      toggle.setAttribute("aria-expanded", "false");
       name.append(toggle);
-      const spf = el("td"); spf.append(policyCell("spf", object(domain.spf)));
-      const dmarc = el("td"); dmarc.append(policyCell("dmarc", object(domain.dmarc)));
-      const security = el("td"); security.append(securityCell(domain));
-      const services = el("td"); services.append(serviceCell(domain));
-      const mx = el("td"); mx.append(mxCell(domain));
-      const extras = el("td"); extras.append(emailExtras(domain));
-      row.append(rank, name, spf, dmarc, security, services, mx, extras);
+      const spf = labelled("SPF"); spf.append(policyCell("spf", object(domain.spf)));
+      const dmarc = labelled("DMARC"); dmarc.append(policyCell("dmarc", object(domain.dmarc)));
+      const mail = labelled("Mail");
+      mail.append(serviceCell(domain), mxCell(domain), emailExtras(domain));
+      const web = labelled("Web"); web.append(securityCell(domain));
+      row.append(rank, name, spf, dmarc, mail, web);
       const details = buildDetails(domain);
       details.hidden = true;
       toggle.addEventListener("click", () => {
         details.hidden = !details.hidden;
         toggle.textContent = details.hidden ? "Inspect findings" : "Hide findings";
+        toggle.setAttribute("aria-expanded", String(!details.hidden));
       });
       target.append(row, details);
     }
     if (!total) {
       const row = el("tr");
       const cell = el("td", "empty-cell", "No domains match these filters.");
-      cell.colSpan = 8;
+      cell.colSpan = COLUMN_COUNT;
       row.append(cell);
       target.append(row);
     }
@@ -705,13 +769,16 @@
       fillSnapshotSelector();
       const snapshots = safeArray(state.index.snapshots).slice().sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at));
       if (!snapshots.length) {
-        byId("feed-status").textContent = "NO SCANS YET";
+        byId("feed-status").textContent = "No scans yet";
         byId("metrics").replaceChildren();
         byId("policy-chart").textContent = "No scans yet";
         byId("history-chart").textContent = "No scans yet";
         byId("spf-history-chart").textContent = "No scans yet";
         byId("signals-chart").textContent = "No scans yet";
         byId("web-chart").textContent = "No scans yet";
+        byId("provider-inbound-chart").textContent = "No scans yet";
+        byId("provider-outbound-chart").textContent = "No scans yet";
+        byId("findings-list").textContent = "No scans yet";
         byId("empty-state").hidden = false;
         byId("domain-rows").replaceChildren();
         setSnapshotMeta(null);
@@ -722,7 +789,8 @@
       byId("snapshot-select").value = String(latest.id);
       await loadSnapshot(latest);
     } catch (error) {
-      byId("feed-status").textContent = "DATA FEED UNAVAILABLE";
+      byId("feed-status").textContent = "Data feed unavailable";
+      byId("findings-list").textContent = "The latest snapshot could not be loaded.";
       byId("empty-state").hidden = true;
       byId("error-state").hidden = false;
       byId("error-state").textContent = `Unable to load the public snapshot: ${error.message}`;
@@ -730,7 +798,7 @@
       byId("domain-rows").replaceChildren();
       const row = el("tr");
       const cell = el("td", "empty-cell", "The snapshot could not be loaded.");
-      cell.colSpan = 8;
+      cell.colSpan = COLUMN_COUNT;
       row.append(cell);
       byId("domain-rows").append(row);
     }

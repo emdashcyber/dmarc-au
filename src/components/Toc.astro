@@ -1,0 +1,33 @@
+---
+interface Props {
+  items: { id: string; label: string }[];
+}
+const { items } = Astro.props;
+---
+<aside class="toc">
+  <nav aria-label="On this page">
+    <h2>On this page</h2>
+    <ol>
+      {items.map((item) => <li><a href={`#${item.id}`}>{item.label}</a></li>)}
+    </ol>
+  </nav>
+</aside>
+<script>
+  const links = [...document.querySelectorAll<HTMLAnchorElement>(".toc a")];
+  const targets = links
+    .map((link) => document.getElementById(link.hash.slice(1)))
+    .filter((el): el is HTMLElement => el !== null);
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        for (const link of links) {
+          if (link.hash === `#${entry.target.id}`) link.setAttribute("aria-current", "true");
+          else link.removeAttribute("aria-current");
+        }
+      }
+    },
+    { rootMargin: "-20% 0px -70% 0px" },
+  );
+  targets.forEach((target) => observer.observe(target));
+</script>

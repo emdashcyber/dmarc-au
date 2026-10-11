@@ -24,7 +24,9 @@ class Element {
   remove() {}
 }
 
-const html = fs.readFileSync("site/index.html", "utf8");
+const path = require("node:path");
+const sourceFiles = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? sourceFiles(path.join(dir, entry.name)) : entry.name.endsWith(".astro") ? [path.join(dir, entry.name)] : []);
+const html = sourceFiles("src").map((file) => fs.readFileSync(file, "utf8")).join("\n");
 const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
 const elements = new Map(ids.map((id) => [id, new Element("div")]));
 for (const id of ["error-state", "empty-state", "download-raw"]) elements.get(id).hidden = true;
@@ -108,13 +110,24 @@ const fetch = async (url) => {
 };
 
 async function main() {
-  const source = fs.readFileSync("site/app.js", "utf8");
+  const source = fs.readFileSync("src/scripts/dashboard.js", "utf8");
   vm.runInNewContext(source, { document, URL: browserURL, fetch, Blob, Response, DecompressionStream, console, Intl, Date, Set, Map, Math, Number, String, Object, Array });
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(elements.get("error-state").hidden, true, elements.get("error-state").textContent);
   const rows = () => elements.get("domain-rows").children.filter((item) => item.className === "data-row");
   assert.equal(rows().length, 3);
   assert.equal(elements.get("metrics").children.length, 8);
+  const allText = (node) => [node.textContent, ...node.children.flatMap((child) => typeof child === "string" ? [child] : allText(child))].join(" ");
+  const findingsText = allText(elements.get("findings-list"));
+  assert.equal(elements.get("findings-list").children.length, 5);
+  assert.match(findingsText, /33% enforce DMARC/);
+  assert.match(findingsText, /Microsoft 365 is the most common inbound mail clue/);
+  const inboundRows = elements.get("provider-inbound-chart").children;
+  assert.equal(inboundRows.length, 1);
+  assert.match(allText(inboundRows[0]), /Microsoft 365/);
+  assert.match(allText(elements.get("provider-outbound-chart").children[0]), /Google Workspace/);
+  assert.equal(rows()[0].children.length, 6);
+  assert.equal(rows()[0].children[2].dataset.label, "SPF");
   assert.ok(fetchCalls.some((url) => url.endsWith("current.json.gz")));
   const spfPoints = elements.get("spf-history-chart").children;
   assert.equal(spfPoints.length, 2);
@@ -154,7 +167,6 @@ async function main() {
   const inspect = domainRow.children[1].children.find((item) => item.textContent === "Inspect findings");
   inspect.click();
   const detailRow = elements.get("domain-rows").children.find((item) => item.className === "detail-row");
-  const allText = (node) => [node.textContent, ...node.children.flatMap(allText)].join(" ");
   const detailText = allText(detailRow);
   assert.match(detailText, /v=spf1 -all/);
   assert.match(detailText, /Root HEAD and security\.txt/);

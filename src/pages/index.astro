@@ -1,0 +1,251 @@
+---
+import Base from "../layouts/Base.astro";
+import Toc from "../components/Toc.astro";
+
+const base = import.meta.env.BASE_URL;
+const repo = "https://github.com/emdashcyber/dmarc-au";
+const toc = [
+  { id: "findings", label: "Findings at a glance" },
+  { id: "results", label: "Results" },
+  { id: "explorer", label: "Domain explorer" },
+  { id: "methodology", label: "Methodology" },
+  { id: "limitations", label: "Limitations" },
+  { id: "reproduce", label: "Reproduce it" },
+];
+const title = "How are .au domains configured for email? | EmDash Cyber";
+const description =
+  "A weekly, open snapshot of SPF, DMARC, mail routing, DNSSEC and security.txt configuration for Tranco-ranked .au domains.";
+const pageUrl = new URL(base, Astro.site).href;
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "Dataset",
+  name: ".au email authentication observatory",
+  description,
+  url: pageUrl,
+  inLanguage: "en-AU",
+  isAccessibleForFree: true,
+  spatialCoverage: "Australia",
+  keywords: ["DMARC", "SPF", "DNSSEC", "security.txt", "email security", ".au"],
+  creator: { "@type": "Organization", name: "EmDash Cyber", url: "https://emdashcyber.com/" },
+  distribution: [
+    { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: new URL(`${base}data/index.json`, Astro.site).href },
+  ],
+};
+---
+<Base
+  title={title}
+  description={description}
+  jsonLd={jsonLd}
+>
+  <header class="hero">
+    <p class="eyebrow">Research / Email security</p>
+    <h1>How are .au domains configured for email?</h1>
+    <p class="lede">
+      A weekly snapshot of SPF, DMARC, mail routing, DNSSEC and security.txt for every .au name in the
+      Tranco top one million, with the data open for you to filter and download.
+    </p>
+    <div class="hero-meta">
+      <span><span class="live-dot" aria-hidden="true"></span><span id="feed-status" role="status">Loading snapshot…</span></span>
+      <span id="snapshot-meta">Waiting for the first scan</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <Toc items={toc} />
+
+    <article class="article">
+      <section id="findings" class="findings" aria-labelledby="findings-title">
+        <h2 id="findings-title">The findings at a glance</h2>
+        <ul id="findings-list" aria-live="polite">
+          <li>Loading the latest snapshot…</li>
+        </ul>
+        <noscript>
+          <p>
+            The charts and domain table need JavaScript. The underlying data is available without it at
+            <a href={`${base}data/index.json`}>data/index.json</a>.
+          </p>
+        </noscript>
+      </section>
+
+      <section id="results" aria-labelledby="results-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Results</p>
+            <h2 id="results-title">Posture overview</h2>
+          </div>
+          <div class="snapshot-tools">
+            <label for="snapshot-select">Snapshot</label>
+            <select id="snapshot-select" disabled><option>Loading…</option></select>
+          </div>
+        </div>
+        <div id="metrics" class="metric-grid" aria-live="polite"></div>
+
+        <div class="chart-grid">
+          <article class="chart-card">
+            <div class="chart-heading"><div><p class="chart-kicker">DMARC</p><h3>Published policy</h3></div><span class="chart-unit">domains</span></div>
+            <div id="policy-chart" class="bar-chart" aria-label="DMARC policy breakdown"></div>
+          </article>
+          <article class="chart-card">
+            <div class="chart-heading"><div><p class="chart-kicker">Over time</p><h3>DMARC enforcement</h3></div><span class="chart-unit">reject + quarantine</span></div>
+            <div id="history-chart" class="history-chart" role="list" aria-label="DMARC enforcement share by scan snapshot"></div>
+            <p id="history-caption" class="chart-caption">Historical trend appears after more snapshots are collected.</p>
+          </article>
+          <article class="chart-card">
+            <div class="chart-heading"><div><p class="chart-kicker">Over time</p><h3>SPF terminal policy</h3></div><span class="chart-unit">share of valid SPF</span></div>
+            <div id="spf-history-chart" class="spf-history-chart" role="list" aria-label="Valid SPF terminal-policy shares by scan snapshot"></div>
+            <div class="spf-chart-legend" aria-label="SPF outcome legend">
+              <span><i class="spf-hardfail"></i>Hardfail −all</span><span><i class="spf-softfail"></i>Softfail ~all</span>
+              <span><i class="spf-neutral"></i>Neutral / implicit</span><span><i class="spf-pass"></i>Pass +all</span>
+            </div>
+            <p id="spf-history-caption" class="chart-caption">SPF policy history appears after more snapshots are collected.</p>
+          </article>
+          <article class="chart-card">
+            <div class="chart-heading"><div><p class="chart-kicker">DNSSEC</p><h3>Email DNS chain states</h3></div><span class="chart-unit">domains / MX hosts</span></div>
+            <div id="signals-chart" class="bar-chart" aria-label="DNSSEC chain states and MX target DNSSEC findings"></div>
+          </article>
+          <article class="chart-card">
+            <div class="chart-heading"><div><p class="chart-kicker">Inferred services</p><h3>Inbound mail (MX)</h3></div><span class="chart-unit">domains</span></div>
+            <div id="provider-inbound-chart" class="bar-chart" aria-label="Inbound mail service clues"></div>
+            <p class="chart-caption">Top services matched from MX hostnames. A domain can match more than one.</p>
+          </article>
+          <article class="chart-card">
+            <div class="chart-heading"><div><p class="chart-kicker">Inferred services</p><h3>Outbound senders (SPF)</h3></div><span class="chart-unit">domains</span></div>
+            <div id="provider-outbound-chart" class="bar-chart" aria-label="Outbound mail service clues"></div>
+            <p class="chart-caption">Top services matched from SPF include and redirect targets.</p>
+          </article>
+          <article class="chart-card wide">
+            <div class="chart-heading"><div><p class="chart-kicker">Limited web sample</p><h3>Root HEAD and security.txt</h3></div><span class="chart-unit">endpoint only</span></div>
+            <div id="web-chart" class="bar-chart" aria-label="security.txt availability and content validation"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="explorer" aria-labelledby="explorer-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Domain explorer</p>
+            <h2 id="explorer-title">Inspect domain signals</h2>
+          </div>
+          <div class="download-actions">
+            <button id="download-json" class="button" type="button" disabled>Download JSON</button>
+            <button id="download-csv" class="button button-primary" type="button" disabled>Download filtered CSV</button>
+            <a id="download-raw" class="button" href="#" download hidden>Raw email JSONL.GZ</a>
+          </div>
+        </div>
+        <p class="section-intro">
+          Ranks show global Tranco placement and position within the current .au subset. Open a row for the email
+          evidence and the limited security.txt request observations.
+        </p>
+
+        <div class="filter-panel">
+          <div class="filter-search"><label for="search-input">Search domains or mail services</label><input id="search-input" type="search" placeholder="Try example.com.au, Google Workspace…" autocomplete="off" /></div>
+          <div><label for="rank-filter">Tranco placement</label><select id="rank-filter"><option value="all">All tracked names</option><option value="in_top_1m">In top 1M</option><option value="outside_top_1m">Outside top 1M</option></select></div>
+          <div><label for="spf-filter">SPF record</label><select id="spf-filter"><option value="all">Any status</option><option value="present_valid">Valid</option><option value="present_invalid">Invalid</option><option value="absent">No record</option><option value="lookup_error">Lookup error</option></select></div>
+          <div><label for="spf-qualifier-filter">SPF ending</label><select id="spf-qualifier-filter"><option value="all">Any ending</option><option value="fail">Hard fail · -all</option><option value="softfail">Softfail · ~all</option><option value="neutral">Neutral · ?all / implicit</option><option value="pass">Pass · +all</option><option value="implicit">No explicit all</option></select></div>
+          <div><label for="dmarc-filter">DMARC</label><select id="dmarc-filter"><option value="all">Any policy</option><option value="reject">Reject</option><option value="quarantine">Quarantine</option><option value="none">None · monitor</option><option value="absent">No record</option><option value="present_invalid">Invalid</option><option value="lookup_error">Lookup error</option></select></div>
+          <div><label for="provider-filter">Likely mail service</label><select id="provider-filter"><option value="all">Any service</option></select></div>
+          <div><label for="dnssec-filter">DNSSEC chain</label><select id="dnssec-filter"><option value="all">Any state</option><option value="secure">Secure</option><option value="unsigned">Unsigned</option><option value="broken">Broken</option><option value="lookup_error">Lookup error</option><option value="unknown">Unknown</option></select></div>
+          <div><label for="securitytxt-filter">security.txt availability</label><select id="securitytxt-filter"><option value="all">Any state</option><option value="present">Present</option><option value="absent">Absent</option><option value="http_error">HTTP error</option><option value="lookup_error">Lookup error</option></select></div>
+          <div><label for="content-validity-filter">security.txt format</label><select id="content-validity-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="not_assessable">Not assessable</option></select></div>
+          <div><label for="securitytxt-freshness-filter">security.txt freshness</label><select id="securitytxt-freshness-filter"><option value="all">Any state</option><option value="current">Current</option><option value="expired">Expired</option><option value="unknown">Unknown</option></select></div>
+          <div><label for="tls-filter">Endpoint certificate</label><select id="tls-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="error">TLS error</option><option value="not_observed">Not observed</option></select></div>
+        </div>
+
+        <div class="table-toolbar">
+          <p id="result-count" aria-live="polite">Loading domains…</p>
+          <div class="pagination" aria-label="Table pages">
+            <button id="previous-page" class="page-button" type="button" aria-label="Previous page" disabled>←</button>
+            <span id="page-label">Page 1</span>
+            <button id="next-page" class="page-button" type="button" aria-label="Next page" disabled>→</button>
+          </div>
+        </div>
+        <div class="table-wrap" role="region" aria-label="Domain results table" tabindex="0">
+          <table>
+            <caption class="sr-only">Tracked .au domains and their email security signals</caption>
+            <thead><tr><th scope="col">Rank</th><th scope="col">Domain</th><th scope="col">SPF</th><th scope="col">DMARC</th><th scope="col">Mail</th><th scope="col">Web</th></tr></thead>
+            <tbody id="domain-rows"><tr><td colspan="6" class="empty-cell">Loading the public snapshot…</td></tr></tbody>
+          </table>
+        </div>
+        <div id="empty-state" class="empty-state" hidden>
+          <h3>No scan data yet</h3>
+          <p>Run the <code>Refresh .au security data and publish Pages</code> workflow from the Actions tab to create the first snapshot.</p>
+        </div>
+        <div id="error-state" class="error-state" role="alert" hidden></div>
+      </section>
+
+      <section id="methodology" aria-labelledby="methodology-title">
+        <h2 id="methodology-title">Methodology</h2>
+        <div class="prose">
+          <p>
+            The collector runs weekly. It downloads the Tranco top one million, keeps every exact .au name (including
+            subdomains), and checks the union of those names and all names tracked in earlier scans. A name that falls
+            out of the top million stays tracked and is shown as <code>&gt;1,000,000</code>.
+          </p>
+          <h3>Email and DNS</h3>
+          <p>
+            For each name the collector records SPF, DMARC, MX, MTA-STS, SMTP TLS reporting, nameservers, SOA and the
+            DNSSEC chain. DNS errors stay distinct from absent and malformed records. DKIM selectors are not probed
+            because a domain's selector set cannot be discovered comprehensively.
+          </p>
+          <h3>Likely mail services</h3>
+          <p>
+            Services are inferred from role-specific hostname matches: outbound clues use SPF include and redirect
+            targets, inbound clues use MX hosts, and reporting clues use DMARC or TLS-RPT destinations. Unmatched
+            hostnames remain <strong>Unclassified</strong>. These clues describe published configuration; they do not
+            confirm actual message traffic.
+          </p>
+          <h3>Root HEAD and security.txt</h3>
+          <p>
+            Before the security.txt request the collector makes a bodyless <code>HEAD /</code>, follows redirects, and
+            records whether that chain upgrades to HTTPS plus selected headers including HSTS. It then GETs only
+            <code>/.well-known/security.txt</code> over HTTP, trying HTTPS only if HTTP fails before returning a
+            response. Format validity, expiry freshness, redirects and certificate validity are reported independently.
+            Response bodies and certificate details are processed in memory and discarded.
+          </p>
+          <p class="method-links">
+            <a href="https://www.rfc-editor.org/rfc/rfc7208" rel="noreferrer">SPF · RFC 7208</a>
+            <a href="https://www.rfc-editor.org/rfc/rfc9989" rel="noreferrer">DMARC · RFC 9989</a>
+            <a href="https://www.rfc-editor.org/rfc/rfc9116" rel="noreferrer">security.txt · RFC 9116</a>
+            <a href="https://tranco-list.eu/" rel="noreferrer">Tranco ranking</a>
+          </p>
+        </div>
+      </section>
+
+      <section id="limitations" aria-labelledby="limitations-title">
+        <h2 id="limitations-title">Limitations</h2>
+        <ul>
+          <li><strong>Popular names only.</strong> The scope is .au names in Tranco's top million plus names retained from earlier scans. It is not every registered .au domain.</li>
+          <li><strong>Configuration, not behaviour.</strong> Records show what is published at scan time. They do not measure message-level pass rates, spoofing exposure or exploitability.</li>
+          <li><strong>Provider labels are inferences.</strong> A matching hostname suggests a service; it does not prove traffic flows through it.</li>
+          <li><strong>The web sample is narrow.</strong> One <code>HEAD /</code> and one security.txt request per name. HEAD results do not model browser-cached HSTS or client-side upgrades.</li>
+          <li><strong>No signature verification.</strong> Signed security.txt structure is checked but signatures are not cryptographically verified.</li>
+          <li><strong>One scan per week.</strong> Short-lived DNS or network failures appear as lookup errors rather than being retried over days.</li>
+          <li><strong>No single score.</strong> Findings are reported per signal and not combined into a site-wide security rating.</li>
+        </ul>
+      </section>
+
+      <section id="reproduce" aria-labelledby="reproduce-title">
+        <h2 id="reproduce-title">Reproduce it</h2>
+        <div class="prose">
+          <p>
+            The collector and this site are open source at
+            <a href={repo}>github.com/emdashcyber/dmarc-au</a>. A GitHub Actions workflow scans every Monday at 03:00
+            Australia/Sydney time and publishes each dated snapshot.
+          </p>
+          <ul>
+            <li><a href={`${base}data/index.json`}>data/index.json</a> lists snapshots and trend summaries.</li>
+            <li>Each snapshot is a gzip-compressed JSON file under <code>data/snapshots/</code>; the matching email-only archive is gzip JSONL under <code>data/raw/</code>.</li>
+          </ul>
+<pre><code>python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m collector.scan
+npm install &amp;&amp; npm run dev</code></pre>
+        </div>
+      </section>
+    </article>
+  </div>
+
+  <script>
+    import "../scripts/dashboard.js";
+  </script>
+</Base>
