@@ -228,18 +228,8 @@ const jsonLd = {
         <h2 id="reproduce-title">Reproduce it</h2>
         <div class="prose">
           <p>
-            The collector and this site are open source at
-            <a href={repo}>github.com/emdashcyber/dmarc-au</a>. A GitHub Actions workflow scans every Monday at 03:00
-            Australia/Sydney time and publishes each dated snapshot.
+            The collector code is available at <a href={repo}>github.com/emdashcyber/dmarc-au</a>.
           </p>
-          <ul>
-            <li><a href={`${base}data/index.json`}>data/index.json</a> lists snapshots and trend summaries.</li>
-            <li>Each snapshot is a gzip-compressed JSON file under <code>data/snapshots/</code>; the matching email-only archive is gzip JSONL under <code>data/raw/</code>.</li>
-          </ul>
-<pre><code>python3 -m venv .venv &amp;&amp; source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m collector.scan
-npm install &amp;&amp; npm run dev</code></pre>
         </div>
       </section>
     </article>

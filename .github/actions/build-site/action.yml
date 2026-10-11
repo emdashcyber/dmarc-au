@@ -1,0 +1,32 @@
+name: Build site
+description: Install, test, build and verify the Astro site.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: "24"
+        cache: npm
+        cache-dependency-path: site/package-lock.json
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: site
+      run: npm ci
+
+    - name: Test dashboard
+      shell: bash
+      working-directory: site
+      run: npm test
+
+    - name: Build site
+      shell: bash
+      working-directory: site
+      run: npm run build
+
+    - name: Verify build output
+      shell: bash
+      working-directory: site
+      run: npm run verify
