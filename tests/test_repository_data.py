@@ -11,7 +11,7 @@ ROOT = Path(__file__).parents[1]
 
 class PublishedDataTests(unittest.TestCase):
     def test_oldest_scan_was_pruned_without_losing_the_roster_or_latest_pointer(self):
-        data_dir = ROOT / "public" / "data"
+        data_dir = ROOT / "site" / "public" / "data"
         index = json.loads((data_dir / "index.json").read_text(encoding="utf-8"))
         removed_id = "20260929T135254Z"
         self.assertNotIn(removed_id, {item["id"] for item in index["snapshots"]})
@@ -23,7 +23,7 @@ class PublishedDataTests(unittest.TestCase):
         self.assertGreater(len(registry.get("domains", {})), 0)
 
     def test_retained_snapshots_provider_clues_match_the_documented_catalog(self):
-        data_dir = ROOT / "public" / "data"
+        data_dir = ROOT / "site" / "public" / "data"
         index = json.loads((data_dir / "index.json").read_text(encoding="utf-8"))
         catalog = load_provider_catalog(ROOT / "collector" / "providers.json")
         for item in index["snapshots"]:

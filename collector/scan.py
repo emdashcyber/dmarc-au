@@ -940,7 +940,7 @@ def load_index(path: Path) -> dict[str, Any]:
         raise ScanError("Existing snapshot index has an unexpected format; preserving it")
     if value.get("schema_version") != SCHEMA_VERSION:
         raise ScanError(
-            f"Snapshot index schema {value.get('schema_version')} is incompatible with schema {SCHEMA_VERSION}; reset public/data first"
+            f"Snapshot index schema {value.get('schema_version')} is incompatible with schema {SCHEMA_VERSION}; reset site/public/data first"
         )
     if not all(isinstance(item, dict) for item in value["snapshots"]):
         raise ScanError("Existing snapshot index contains an invalid entry; preserving it")
@@ -1458,7 +1458,7 @@ def check_domain(domain: str) -> Any:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=Path("public/data"))
+    parser.add_argument("--output-dir", type=Path, default=Path("site/public/data"))
     parser.add_argument("--rank-limit", type=int, default=1_000_000)
     parser.add_argument("--delay-seconds", type=float, default=DOMAIN_DELAY_SECONDS)
     args = parser.parse_args(argv)

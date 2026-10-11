@@ -75,7 +75,7 @@ def prepare_scan(
     rank_limit: int = 1_000_000,
     shard_size: int = SHARD_SIZE,
     github_output: Path | None = None,
-    registry_path: Path = Path("public/data/registry.json"),
+    registry_path: Path = Path("site/public/data/registry.json"),
 ) -> dict[str, Any]:
     if shard_size < 1:
         raise ValueError("shard_size must be greater than zero")
@@ -361,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--output", type=Path, required=True)
     prepare.add_argument("--rank-limit", type=int, default=1_000_000)
     prepare.add_argument("--shard-size", type=int, default=SHARD_SIZE)
-    prepare.add_argument("--registry", type=Path, default=Path("public/data/registry.json"))
+    prepare.add_argument("--registry", type=Path, default=Path("site/public/data/registry.json"))
     prepare.add_argument("--github-output", type=Path)
 
     shard = subparsers.add_parser("scan-shard", help="scan one 200-domain matrix shard")
@@ -373,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
     merge = subparsers.add_parser("merge", help="validate all shards and publish the complete snapshot")
     merge.add_argument("--input", type=Path, required=True)
     merge.add_argument("--shards", type=Path, required=True)
-    merge.add_argument("--output-dir", type=Path, default=Path("public/data"))
+    merge.add_argument("--output-dir", type=Path, default=Path("site/public/data"))
 
     args = parser.parse_args(argv)
     try:

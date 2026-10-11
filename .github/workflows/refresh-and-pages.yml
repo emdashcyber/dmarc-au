@@ -47,7 +47,7 @@ jobs:
         run: >-
           python -m collector.workflow prepare
           --output work/tranco-au.json
-          --registry public/data/registry.json
+          --registry site/public/data/registry.json
           --github-output "$GITHUB_OUTPUT"
 
       - name: Save scan input
@@ -147,13 +147,13 @@ jobs:
           path: work/input
 
       - name: Validate and merge the complete scan
-        run: python -m collector.workflow merge --input work/input/tranco-au.json --shards work/shards --output-dir public/data
+        run: python -m collector.workflow merge --input work/input/tranco-au.json --shards work/shards --output-dir site/public/data
 
       - name: Commit compressed snapshots, raw email archive, and tracked-domain registry
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/data/index.json public/data/registry.json public/data/snapshots public/data/raw
+          git add site/public/data/index.json site/public/data/registry.json site/public/data/snapshots site/public/data/raw
           if ! git diff --cached --quiet; then
             git commit -m "data: refresh .au security posture snapshot"
             git push
@@ -164,8 +164,10 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+          cache-dependency-path: site/package-lock.json
 
       - name: Build site
+        working-directory: site
         run: npm ci && npm run build
 
       - name: Configure GitHub Pages
@@ -174,7 +176,7 @@ jobs:
       - name: Upload static site
         uses: actions/upload-pages-artifact@v5
         with:
-          path: dist
+          path: site/dist
 
       - name: Deploy to GitHub Pages
         id: deployment
@@ -199,8 +201,10 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+          cache-dependency-path: site/package-lock.json
 
       - name: Build site
+        working-directory: site
         run: npm ci && npm run build
 
       - name: Configure GitHub Pages
@@ -209,7 +213,7 @@ jobs:
       - name: Upload static site
         uses: actions/upload-pages-artifact@v5
         with:
-          path: dist
+          path: site/dist
 
       - name: Deploy to GitHub Pages
         id: deployment
