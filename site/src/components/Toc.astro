@@ -30,4 +30,14 @@ const { items } = Astro.props;
     { rootMargin: "-20% 0px -70% 0px" },
   );
   targets.forEach((target) => observer.observe(target));
+
+  // The explorer spans the sidebar column, so hide the TOC while it overlaps the sticky nav.
+  const toc = document.querySelector(".toc");
+  const wide = document.querySelector(".explorer-wide");
+  if (toc && wide) {
+    new IntersectionObserver(
+      ([entry]) => toc.classList.toggle("is-hidden", entry.isIntersecting),
+      { rootMargin: "-80px 0px -35% 0px" },
+    ).observe(wide);
+  }
 </script>

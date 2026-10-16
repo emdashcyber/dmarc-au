@@ -120,7 +120,7 @@ const jsonLd = {
         </div>
       </section>
 
-      <section id="explorer" aria-labelledby="explorer-title">
+      <section id="explorer" class="explorer-wide" aria-labelledby="explorer-title">
         <div class="section-heading">
           <div>
             <p class="eyebrow">Domain explorer</p>
@@ -162,7 +162,7 @@ const jsonLd = {
         <div class="table-wrap" role="region" aria-label="Domain results table" tabindex="0">
           <table>
             <caption class="sr-only">Tracked .au domains and their email security signals</caption>
-            <thead><tr><th scope="col">Rank</th><th scope="col">Domain</th><th scope="col">SPF</th><th scope="col">DMARC</th><th scope="col">Mail</th><th scope="col">Web</th></tr></thead>
+            <thead><tr><th scope="col" class="col-rank">Rank</th><th scope="col" class="col-domain">Domain</th><th scope="col" class="col-policy">SPF</th><th scope="col" class="col-policy">DMARC</th><th scope="col" class="col-mail">Mail</th><th scope="col" class="col-web">Web</th></tr></thead>
             <tbody id="domain-rows"><tr><td colspan="6" class="empty-cell">Loading the public snapshot…</td></tr></tbody>
           </table>
         </div>
