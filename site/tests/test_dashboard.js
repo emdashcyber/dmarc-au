@@ -109,12 +109,24 @@ const fetch = async (url) => {
   } };
 };
 
+async function waitFor(predicate, description, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(predicate(), `${description} (feed status: ${elements.get("feed-status").textContent}; error: ${elements.get("error-state").textContent || "none"})`);
+}
+
 async function main() {
-  const source = fs.readFileSync("src/scripts/dashboard.js", "utf8");
-  vm.runInNewContext(source, { document, URL: browserURL, fetch, Blob, Response, DecompressionStream, console, Intl, Date, Set, Map, Math, Number, String, Object, Array });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal(elements.get("error-state").hidden, true, elements.get("error-state").textContent);
+  await assert.rejects(
+    waitFor(() => false, "Synthetic dashboard wait timed out", 20),
+    /Synthetic dashboard wait timed out.*feed status:/,
+  );
   const rows = () => elements.get("domain-rows").children.filter((item) => item.className === "data-row");
+  const source = fs.readFileSync("src/scripts/dashboard.js", "utf8");
+  vm.runInNewContext(source, { document, URL: browserURL, fetch, Blob, Response, DecompressionStream, TextDecoder, console, Intl, Date, Set, Map, Math, Number, String, Object, Array });
+  await waitFor(() => rows().length === 3 || !elements.get("error-state").hidden, "Dashboard did not finish loading the expected three rows");
+  assert.equal(elements.get("error-state").hidden, true, elements.get("error-state").textContent);
   assert.equal(rows().length, 3);
   assert.equal(elements.get("metrics").children.length, 8);
   const allText = (node) => [node.textContent, ...node.children.flatMap((child) => typeof child === "string" ? [child] : allText(child))].join(" ");
@@ -174,9 +186,14 @@ async function main() {
   assert.doesNotMatch(detailText.toLowerCase(), /fingerprint|subject_alt_names|certificate metadata/);
 
   const select = elements.get("snapshot-select");
+  const previousSnapshotMeta = elements.get("snapshot-meta").textContent;
   select.value = "old";
   select.listeners.change({ target: select });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitFor(
+    () => elements.get("snapshot-meta").textContent !== previousSnapshotMeta || !elements.get("error-state").hidden,
+    "Selected snapshot did not finish loading",
+  );
+  assert.equal(elements.get("error-state").hidden, true, elements.get("error-state").textContent);
   assert.ok(fetchCalls.some((url) => url.endsWith("old.json.gz")));
 
   elements.get("search-input").value = "";
