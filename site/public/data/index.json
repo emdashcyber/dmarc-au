@@ -1,7 +1,151 @@
 {
   "schema_version": 5,
-  "latest": "snapshots/20261025T184203Z.json.gz",
+  "latest": "snapshots/20261101T200643Z.json.gz",
   "snapshots": [
+    {
+      "id": "20261101T200643Z",
+      "path": "snapshots/20261101T200643Z.json.gz",
+      "raw_archive": "raw/20261101T200643Z.jsonl.gz",
+      "generated_at": "2026-11-01T20:06:43Z",
+      "domain_count": 8769,
+      "summary": {
+        "domain_count": 8769,
+        "rank_status": {
+          "in_top_1m": 7280,
+          "outside_top_1m": 1489
+        },
+        "security_txt": {
+          "present": 650,
+          "absent": 5524,
+          "lookup_error": 1210,
+          "http_error": 1385,
+          "not_collected": 0
+        },
+        "security_txt_content_validity": {
+          "valid": 126,
+          "invalid": 149,
+          "not_assessable": 8494
+        },
+        "security_txt_freshness": {
+          "current": 123,
+          "expired": 29,
+          "unknown": 8617
+        },
+        "security_txt_tls_certificate": {
+          "valid": 6100,
+          "invalid": 52,
+          "not_observed": 2276,
+          "error": 341
+        },
+        "security_txt_headers": {
+          "strict-transport-security": 3601,
+          "alt-svc": 3633,
+          "x-frame-options": 3512,
+          "content-security-policy": 2581,
+          "content-length": 5748,
+          "server": 7278,
+          "content-type": 7758,
+          "x-content-type-options": 3892,
+          "permissions-policy": 972,
+          "cross-origin-resource-policy": 544,
+          "referrer-policy": 2026,
+          "cross-origin-opener-policy": 939,
+          "cross-origin-embedder-policy": 489,
+          "access-control-allow-origin": 532,
+          "access-control-allow-methods": 325,
+          "access-control-expose-headers": 94,
+          "access-control-allow-headers": 106,
+          "access-control-allow-credentials": 70,
+          "x-powered-by": 973,
+          "content-encoding": 9
+        },
+        "security_txt_redirects_to_https": 6122,
+        "security_txt_https_responses": 6030,
+        "root_head_https_upgrade": {
+          "upgraded": 7061,
+          "not_upgraded": 1005,
+          "unknown": 703
+        },
+        "root_head_hsts_present": 3958,
+        "root_head_headers": {
+          "strict-transport-security": 3958,
+          "alt-svc": 3834,
+          "content-length": 5180,
+          "server": 7482,
+          "content-type": 7997,
+          "x-frame-options": 4665,
+          "content-security-policy": 3581,
+          "x-content-type-options": 4616,
+          "referrer-policy": 2852,
+          "permissions-policy": 1645,
+          "cross-origin-opener-policy": 1571,
+          "cross-origin-resource-policy": 1170,
+          "cross-origin-embedder-policy": 1109,
+          "access-control-allow-origin": 574,
+          "access-control-allow-methods": 336,
+          "access-control-expose-headers": 118,
+          "access-control-allow-headers": 107,
+          "x-powered-by": 1149,
+          "access-control-allow-credentials": 61,
+          "content-encoding": 16
+        },
+        "spf": {
+          "present_valid": 6619,
+          "present_invalid": 580,
+          "absent": 1241,
+          "lookup_error": 329
+        },
+        "dmarc": {
+          "present_valid": 6196,
+          "present_invalid": 68,
+          "absent": 2174,
+          "lookup_error": 331
+        },
+        "mx": {
+          "present_valid": 7471,
+          "present_invalid": 0,
+          "absent": 1058,
+          "lookup_error": 240
+        },
+        "mta_sts": {
+          "present_valid": 202,
+          "present_invalid": 1,
+          "absent": 8039,
+          "lookup_error": 527
+        },
+        "tls_reporting": {
+          "present_valid": 264,
+          "present_invalid": 0,
+          "absent": 8205,
+          "lookup_error": 300
+        },
+        "spf_qualifiers": {
+          "fail": 3043,
+          "softfail": 3417,
+          "neutral": 157,
+          "pass": 2
+        },
+        "dmarc_policies": {
+          "quarantine": 1468,
+          "reject": 2014,
+          "none": 2714
+        },
+        "dnssec": {
+          "secure": 256,
+          "unsigned": 8240,
+          "broken": 0,
+          "lookup_error": 273,
+          "unknown": 0
+        },
+        "mx_dnssec": {
+          "secure": 566,
+          "unsigned": 2,
+          "broken": 0,
+          "lookup_error": 2590,
+          "unknown": 12784
+        }
+      }
+    },
     {
       "id": "20261025T184203Z",
       "path": "snapshots/20261025T184203Z.json.gz",
