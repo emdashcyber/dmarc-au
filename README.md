@@ -36,7 +36,7 @@ The website is a separate Astro project in `site/`:
 
 ```sh
 cd site
-npm install
+npm ci
 npm run dev
 ```
 
@@ -70,8 +70,19 @@ Push the repository to GitHub and set **Settings → Pages → Build and deploym
 ## Offline checks
 
 ```sh
-python3 -m unittest discover -s tests -v
-cd site
-npm test
-npm run build
+python3 -m pip install -r requirements.txt
+npm --prefix site ci
+npm --prefix site run check
 ```
+
+## Repeatable validation
+
+From the repository root, use Node from `.node-version` and Python from `.python-version` (the same versions as CI):
+
+```sh
+python3 -m pip install -r requirements.txt
+npm --prefix site ci
+npm --prefix site run check
+```
+
+`check` runs all Python collector tests, the dashboard harness, the production build and build verification. Tests use fixtures and retained repository snapshots; they do not collect live domains or rewrite the roster. Generated `site/dist`, `.astro`, Python caches and installed dependencies are ignored. PR/manual checks and both publishing paths use this command. Data collection and deployment remain separate workflow actions.

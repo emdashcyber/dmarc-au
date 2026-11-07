@@ -1,5 +1,5 @@
 name: Build site
-description: Install, test, build and verify the Astro site.
+description: Install dependencies, test the collector and dashboard, build and verify the site.
 
 runs:
   using: composite
@@ -7,7 +7,7 @@ runs:
     - name: Set up Node.js
       uses: actions/setup-node@v5
       with:
-        node-version: "26"
+        node-version-file: .node-version
         cache: npm
         cache-dependency-path: site/package-lock.json
 
@@ -16,17 +16,18 @@ runs:
       working-directory: site
       run: npm ci
 
-    - name: Test dashboard
-      shell: bash
-      working-directory: site
-      run: npm test
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version-file: .python-version
+        cache: pip
+        cache-dependency-path: requirements.txt
 
-    - name: Build site
+    - name: Install collector test dependencies
       shell: bash
-      working-directory: site
-      run: npm run build
+      run: python -m pip install -r requirements.txt
 
-    - name: Verify build output
+    - name: Test, build and verify
       shell: bash
       working-directory: site
-      run: npm run verify
+      run: npm run check

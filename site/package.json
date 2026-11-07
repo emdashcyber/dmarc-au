@@ -10,7 +10,9 @@
     "build": "astro build",
     "preview": "astro preview",
     "test": "node --check src/scripts/dashboard.js && node tests/test_dashboard.js",
-    "verify": "node --test tests/verify-build.mjs"
+    "verify": "node --test tests/verify-build.mjs",
+    "test:python": "cd .. && python3 -m unittest discover -s tests",
+    "check": "npm run test:python && npm test && npm run build && npm run verify"
   },
   "dependencies": {
     "astro": "^7.3.5"
