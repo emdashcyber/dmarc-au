@@ -6,6 +6,11 @@
   const PAGE_SIZE = 25;
   const COLUMN_COUNT = 6;
   const state = { index: null, snapshot: null, domains: [], filtered: [], page: 1 };
+  let snapshotRequest = 0;
+  let snapshotController = null;
+  let snapshotLoading = false;
+  let loadedEntry = null;
+  let rawArchiveUrl = null;
 
   const byId = (id) => document.getElementById(id);
   const el = (tag, className, text) => {
@@ -291,7 +296,7 @@
     }
     const source = object(snapshot.source);
     byId("snapshot-meta").textContent = `${dateLabel(snapshot.generated_at, true)} · Tranco ${display(source.list_id)} · ${count(source.au_entry_count)} current .au entries`;
-    byId("feed-status").textContent = "Latest snapshot loaded";
+    byId("feed-status").textContent = "Snapshot loaded";
   }
 
   function fillSnapshotSelector() {
@@ -677,29 +682,79 @@
     return JSON.parse(text);
   }
 
-  async function loadSnapshot(entry) {
-    const url = new URL(entry.path, DATA_BASE_URL);
-    const response = await fetch(url, { cache: "force-cache" });
-    const snapshot = await decodeSnapshot(response, entry.path);
-    if (snapshot.schema_version !== 5) throw new Error(`Unsupported snapshot schema ${snapshot.schema_version}`);
-    state.snapshot = snapshot;
-    state.domains = safeArray(snapshot.domains);
-    state.filtered = state.domains;
-    state.page = 1;
-    setSnapshotMeta(snapshot);
-    setMetricCards(snapshot);
-    drawCharts(snapshot);
-    populateProviderFilter();
-    getFilteredDomains();
-    byId("empty-state").hidden = state.domains.length !== 0;
-    byId("download-json").disabled = false;
-    byId("download-csv").disabled = false;
-    const raw = snapshot.raw_archive || entry.raw_archive;
+  function updateDownloads() {
+    const available = !snapshotLoading && state.snapshot !== null;
+    byId("download-json").disabled = !available;
+    byId("download-csv").disabled = !available;
     const rawLink = byId("download-raw");
-    if (raw) {
-      rawLink.href = new URL(raw, DATA_BASE_URL).href;
-      rawLink.hidden = false;
-    } else rawLink.hidden = true;
+    rawLink.hidden = !available || !rawArchiveUrl;
+    if (available && rawArchiveUrl) rawLink.href = rawArchiveUrl;
+  }
+
+  function showUnavailable(error) {
+    byId("feed-status").textContent = "Data feed unavailable";
+    byId("findings-list").textContent = "The snapshot could not be loaded.";
+    byId("empty-state").hidden = true;
+    byId("error-state").hidden = false;
+    byId("error-state").textContent = `Unable to load the public snapshot: ${error.message}`;
+    byId("result-count").textContent = "Data feed unavailable";
+    const row = el("tr");
+    const cell = el("td", "empty-cell", "The snapshot could not be loaded.");
+    cell.colSpan = COLUMN_COUNT;
+    row.append(cell);
+    byId("domain-rows").replaceChildren(row);
+    updateDownloads();
+  }
+
+  async function loadSnapshot(entry) {
+    const request = ++snapshotRequest;
+    snapshotController?.abort();
+    const controller = new AbortController();
+    snapshotController = controller;
+    snapshotLoading = true;
+    byId("error-state").hidden = true;
+    byId("feed-status").textContent = state.snapshot
+      ? "Loading selected snapshot · showing previous snapshot"
+      : "Loading snapshot…";
+    updateDownloads();
+    try {
+      const url = new URL(entry.path, DATA_BASE_URL);
+      const response = await fetch(url, { cache: "force-cache", signal: controller.signal });
+      if (request !== snapshotRequest) return;
+      const snapshot = await decodeSnapshot(response, entry.path);
+      // Aborting fetch cannot cancel decoding that has already started.
+      if (request !== snapshotRequest) return;
+      if (snapshot.schema_version !== 5) throw new Error(`Unsupported snapshot schema ${snapshot.schema_version}`);
+      const raw = snapshot.raw_archive || entry.raw_archive;
+      const rawUrl = raw ? new URL(raw, DATA_BASE_URL).href : null;
+      state.snapshot = snapshot;
+      state.domains = safeArray(snapshot.domains);
+      state.filtered = state.domains;
+      state.page = 1;
+      loadedEntry = entry;
+      rawArchiveUrl = rawUrl;
+      byId("snapshot-select").value = String(entry.id);
+      setSnapshotMeta(snapshot);
+      setMetricCards(snapshot);
+      drawCharts(snapshot);
+      populateProviderFilter();
+      getFilteredDomains();
+      byId("empty-state").hidden = state.domains.length !== 0;
+    } catch (error) {
+      if (request !== snapshotRequest) return;
+      if (loadedEntry) {
+        byId("snapshot-select").value = String(loadedEntry.id);
+        byId("feed-status").textContent = "Showing previously loaded snapshot";
+        byId("error-state").hidden = false;
+        byId("error-state").textContent = `Unable to load the selected snapshot: ${error.message}. Showing the previous snapshot.`;
+      } else showUnavailable(error);
+    } finally {
+      if (request === snapshotRequest) {
+        snapshotLoading = false;
+        snapshotController = null;
+        updateDownloads();
+      }
+    }
   }
 
   function csvCell(value) {
@@ -720,6 +775,7 @@
   }
 
   function exportCSV() {
+    if (snapshotLoading || !state.snapshot) return;
     const headers = [
       "domain", "rank_status", "rank_display", "tranco_rank", "au_rank", "au_rank_total", "last_rank", "last_au_rank", "last_rank_list_id", "last_ranked_at", "first_seen_at",
       "spf_status", "spf_valid", "spf_record", "spf_terminal", "spf_dns_lookups", "spf_void_lookups", "spf_mechanisms", "spf_service_targets",
@@ -754,6 +810,7 @@
   }
 
   function exportJSON() {
+    if (snapshotLoading || !state.snapshot) return;
     const date = state.snapshot.generated_at ? state.snapshot.generated_at.slice(0, 10) : "snapshot";
     downloadFile(`au-mail-auth-${date}.json`, JSON.stringify(state.snapshot, null, 2), "application/json;charset=utf-8");
   }
@@ -789,31 +846,14 @@
       byId("snapshot-select").value = String(latest.id);
       await loadSnapshot(latest);
     } catch (error) {
-      byId("feed-status").textContent = "Data feed unavailable";
-      byId("findings-list").textContent = "The latest snapshot could not be loaded.";
-      byId("empty-state").hidden = true;
-      byId("error-state").hidden = false;
-      byId("error-state").textContent = `Unable to load the public snapshot: ${error.message}`;
-      byId("result-count").textContent = "Data feed unavailable";
-      byId("domain-rows").replaceChildren();
-      const row = el("tr");
-      const cell = el("td", "empty-cell", "The snapshot could not be loaded.");
-      cell.colSpan = COLUMN_COUNT;
-      row.append(cell);
-      byId("domain-rows").append(row);
+      showUnavailable(error);
     }
   }
 
   byId("snapshot-select").addEventListener("change", async (event) => {
     const entry = safeArray(state.index && state.index.snapshots).find((item) => String(item.id) === event.target.value);
     if (!entry) return;
-    try {
-      byId("error-state").hidden = true;
-      await loadSnapshot(entry);
-    } catch (error) {
-      byId("error-state").hidden = false;
-      byId("error-state").textContent = `Unable to load the selected snapshot: ${error.message}`;
-    }
+    await loadSnapshot(entry);
   });
 
   for (const id of ["search-input", "rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "securitytxt-filter", "content-validity-filter", "securitytxt-freshness-filter", "tls-filter"]) {
