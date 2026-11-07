@@ -1,3 +1,4 @@
+let viewHelpers, browser;
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
@@ -22,6 +23,7 @@ class Element {
   addEventListener(name, callback) { this.listeners[name] = callback; }
   click() { if (!this.disabled && this.listeners.click) this.listeners.click({ target: this }); }
   remove() {}
+  focus() { this.focused = true; }
 }
 
 const path = require("node:path");
@@ -91,7 +93,8 @@ function responseFor(name) {
   } };
 }
 
-function startDashboard({ fetchSnapshot = ({ name }) => responseFor(name) } = {}) {
+function startDashboard({ fetchSnapshot = ({ name }) => responseFor(name), fetchIndex = async () => ({ ok: true, json: async () => index }), url = "https://example.test/observatory/?snapshot=current" } = {}) {
+  const b = browser(url);
   const elements = new Map(ids.map((id) => [id, new Element("div")]));
   for (const id of ["error-state", "empty-state", "download-raw"]) elements.get(id).hidden = true;
   for (const id of ["snapshot-select", "download-json", "download-csv"]) elements.get(id).disabled = true;
@@ -115,8 +118,8 @@ function startDashboard({ fetchSnapshot = ({ name }) => responseFor(name) } = {}
   const fetchCalls = [];
   const fetch = async (url, options = {}) => {
     fetchCalls.push(String(url));
-    if (String(url).includes("index.json")) return { ok: true, json: async () => index };
-    return fetchSnapshot({ name: String(url).split("/").at(-1), signal: options.signal });
+    if (String(url).includes("index.json")) return fetchIndex(options.signal);
+    return fetchSnapshot({ name: String(url).split("/").at(-1), signal: options.signal, cache: options.cache });
   };
 
   async function waitFor(predicate, description, timeoutMs = 5000) {
@@ -124,13 +127,14 @@ function startDashboard({ fetchSnapshot = ({ name }) => responseFor(name) } = {}
     while (!predicate() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.ok(predicate(), `${description} (feed status: ${elements.get("feed-status").textContent}; error: ${elements.get("error-state").textContent || "none"})`);
+    assert.ok(predicate(), `${description} (feed status: ${elements.get("feed-status").textContent}; error: ${elements.get("error-message").textContent || "none"})`);
   }
 
-  const source = fs.readFileSync("src/scripts/dashboard.js", "utf8");
-  vm.runInNewContext(source, { document, URL: browserURL, fetch, AbortController, Blob, Response, DecompressionStream, TextDecoder, console, Intl, Date, Set, Map, Math, Number, String, Object, Array });
+  const source = fs.readFileSync("src/scripts/dashboard.js", "utf8").replace(/^import .*view-state.mjs.*;\n/, "");
+  vm.runInNewContext(source, { ...viewHelpers, searchDebounce: commit => viewHelpers.searchDebounce(commit, b.timers), window: b.window, URLSearchParams, setTimeout: b.timers.set, clearTimeout: b.timers.clear, document, URL: browserURL, fetch, AbortController, Blob, Response, DecompressionStream, TextDecoder, console, Intl, Date, Set, Map, Math, Number, String, Object, Array });
   return {
-    elements, downloads, downloadNames, fetchCalls, waitFor,
+    ...b, elements, downloads, downloadNames, fetchCalls, waitFor,
+    setIndexFetch(handler) { fetchIndex = handler; },
     setSnapshotFetch(handler = ({ name }) => responseFor(name)) { fetchSnapshot = handler; },
     select(id) {
       const target = elements.get("snapshot-select");
@@ -144,14 +148,14 @@ function startDashboard({ fetchSnapshot = ({ name }) => responseFor(name) } = {}
 const allText = (node) => [node.textContent, ...node.children.flatMap((child) => typeof child === "string" ? [child] : allText(child))].join(" ");
 
 async function main() {
-  const { elements, downloads, fetchCalls, waitFor } = startDashboard();
+  const { elements, downloads, fetchCalls, waitFor, flush } = startDashboard();
   await assert.rejects(
     waitFor(() => false, "Synthetic dashboard wait timed out", 20),
     /Synthetic dashboard wait timed out.*feed status:/,
   );
   const rows = () => elements.get("domain-rows").children.filter((item) => item.className === "data-row");
   await waitFor(() => rows().length === 3 || !elements.get("error-state").hidden, "Dashboard did not finish loading the expected three rows");
-  assert.equal(elements.get("error-state").hidden, true, elements.get("error-state").textContent);
+  assert.equal(elements.get("error-state").hidden, true, elements.get("error-message").textContent);
   assert.equal(rows().length, 3);
   assert.equal(elements.get("metrics").children.length, 8);
   const findingsText = allText(elements.get("findings-list"));
@@ -180,6 +184,7 @@ async function main() {
     ["securitytxt-filter", "present"], ["content-validity-filter", "valid"], ["securitytxt-freshness-filter", "expired"], ["dnssec-filter", "secure"],
   ];
   for (const [id, value] of filters) {
+    elements.get("clear-filters").click();
     for (const [filterId] of filters) elements.get(filterId).value = "all";
     const control = elements.get(id);
     control.value = value;
@@ -187,6 +192,7 @@ async function main() {
     assert.equal(rows().length, 1, `${id} filter should return one row`);
   }
   for (const [filterId] of filters) elements.get(filterId).value = "all";
+  elements.get("clear-filters").click();
   const freshnessFilter = elements.get("securitytxt-freshness-filter");
   freshnessFilter.value = "unknown";
   freshnessFilter.listeners.change({ target: freshnessFilter });
@@ -195,9 +201,11 @@ async function main() {
   elements.get("rank-filter").value = "all";
   elements.get("provider-filter").value = "all";
   elements.get("securitytxt-freshness-filter").value = "all";
+  elements.get("clear-filters").click();
   const search = elements.get("search-input");
   search.value = "Google Workspace";
   search.listeners.input({ target: search });
+  flush();
   assert.equal(rows().length, 1);
   const domainRow = rows()[0];
   const inspect = domainRow.children[1].children.find((item) => item.textContent === "Inspect findings");
@@ -217,7 +225,7 @@ async function main() {
     () => elements.get("snapshot-meta").textContent !== previousSnapshotMeta || !elements.get("error-state").hidden,
     "Selected snapshot did not finish loading",
   );
-  assert.equal(elements.get("error-state").hidden, true, elements.get("error-state").textContent);
+  assert.equal(elements.get("error-state").hidden, true, elements.get("error-message").textContent);
   assert.ok(fetchCalls.some((url) => url.endsWith("old.json.gz")));
 
   elements.get("search-input").value = "";
@@ -253,7 +261,7 @@ function visibleState({ elements }) {
   return JSON.stringify({
     selected: elements.get("snapshot-select").value,
     text: ["feed-status", "snapshot-meta", "metrics", "findings-list", "policy-chart", "signals-chart", "web-chart", "provider-inbound-chart", "provider-outbound-chart", "domain-rows", "result-count", "page-label"].map((id) => allText(elements.get(id))),
-    error: [elements.get("error-state").hidden, elements.get("error-state").textContent],
+    error: [elements.get("error-state").hidden, elements.get("error-message").textContent],
     downloads: [elements.get("download-json").disabled, elements.get("download-csv").disabled, elements.get("download-raw").hidden, elements.get("download-raw").href],
   });
 }
@@ -359,7 +367,7 @@ async function selectionFailureAndRetry() {
   pending[0].resolve({ ok: false, status: 503 });
   await selected;
   assert.equal(h.elements.get("error-state").hidden, false);
-  assert.match(h.elements.get("error-state").textContent, /503.*previous snapshot/);
+  assert.match(h.elements.get("error-message").textContent, /503.*previous snapshot/);
   assert.equal(allText(h.elements.get("metrics")), originalMetrics);
   await assertLoaded(h, "current", currentSnapshot);
 
@@ -412,7 +420,112 @@ async function supersededInitialLoad() {
   await assertLoaded(h, "old", oldSnapshot);
 }
 
+async function navigation() {
+  const { parseView, viewURL, searchDebounce } = viewHelpers;
+  const url = new URL("https://example.test/nested/?snapshot=old&q=A%26B&spf=absent&provider=Missing&page=3&utm=x#results");
+  const parsed = parseView(url.searchParams);
+  assert.deepEqual(parseView(new URL(viewURL(url, parsed), url).searchParams), parsed);
+  assert.equal(viewURL(url, parseView(new URLSearchParams())), "/nested/?utm=x#results");
+  for (const page of ["0", "-1", "1.2", "oops", "9007199254740992"]) assert.equal(parseView(new URLSearchParams({ page, spf: "bad" })).page, 1);
+  assert.equal(parseView(new URLSearchParams("spf=bad")).spf, "all");
+  let callback; const changes = [];
+  const debounce = searchDebounce(value => changes.push(value), { set(run) { callback = run; }, clear() {} });
+  debounce.schedule("pending"); debounce.cancel(); callback(); assert.deepEqual(changes, []);
+  const h = startDashboard({ url: "https://example.test/observatory/?utm=x#results" });
+  await h.ready();
+  await assertLoaded(h, "", currentSnapshot);
+  assert.equal(h.window.location.search, "?utm=x");
+  await h.select("old"); assert.match(h.window.location.search, /snapshot=old/);
+  const length = h.history.length;
+  const search = h.elements.get("search-input");
+  search.value = "stale draft"; search.listeners.input();
+  await h.go(-1); h.flush();
+  assert.equal(search.value, ""); assert.equal(h.history.length, length);
+  await assertLoaded(h, "", currentSnapshot);
+  await h.go(1); await assertLoaded(h, "old", oldSnapshot);
+  h.elements.get("provider-filter").value = "Microsoft 365";
+  h.elements.get("provider-filter").listeners.change();
+  assert.match(allText(h.elements.get("provider-filter")), /Microsoft 365 \(unavailable\)/);
+  assert.match(h.elements.get("result-count").textContent, /^0 matching/);
+  h.elements.get("clear-filters").click();
+  assert.match(h.window.location.search, /snapshot=old/);
+  await h.select("");
+  h.setIndexFetch(async () => ({ ok: true, json: async () => ({ ...index, latest: entries[1].path }) }));
+  await h.elements.get("refresh-data").listeners.click();
+  await assertLoaded(h, "", oldSnapshot);
+  assert.doesNotMatch(h.window.location.search, /snapshot=/);
+  await h.select("current");
+  await h.elements.get("refresh-data").listeners.click();
+  await assertLoaded(h, "current", currentSnapshot);
+  const missing = startDashboard({ url: "https://example.test/observatory/?snapshot=gone&page=77&utm=x#results" });
+  await missing.ready(); await assertLoaded(missing, "", currentSnapshot);
+  assert.equal(missing.window.location.search, "?utm=x");
+  assert.equal(missing.elements.get("snapshot-notice").hidden, false);
+  assert.match(missing.elements.get("snapshot-notice").textContent, /no longer available/);
+  const pending = deferRequests(missing);
+  const request = missing.select("old");
+  missing.elements.get("search-input").value = "portal";
+  missing.elements.get("search-input").listeners.input(); missing.flush();
+  pending[0].resolve(responseFor("old.json.gz")); await request;
+  assert.match(missing.window.location.search, /snapshot=old.*q=portal/);
+  assert.match(missing.elements.get("result-count").textContent, /^1 matching/);
+  const failed = missing.select("current"); pending[1].reject(new Error("Offline")); await failed;
+  assert.match(missing.window.location.search, /snapshot=old/);
+  missing.setSnapshotFetch(({ name, cache }) => { assert.equal(cache, "no-cache", "Retry must revalidate a cached failure"); return responseFor(name); });
+  await missing.elements.get("retry-data").listeners.click();
+  assert.match(missing.window.location.search, /snapshot=current/);
+  assert.equal(missing.elements.get("error-state").hidden, true);
+  missing.elements.get("download-json").click();
+  assert.equal(JSON.parse(await missing.downloads.at(-1).text()).generated_at, currentSnapshot.generated_at);
+  missing.elements.get("download-csv").click();
+  const csv = await missing.downloads.at(-1).text();
+  assert.match(csv, /portal.example.au/); assert.doesNotMatch(csv, /mail.example.gov.au/);
+  const many = { ...currentSnapshot, domains: Array.from({ length: 52 }, (_, n) => ({ ...domains[0], domain: `domain${n}.au` })) };
+  const paged = startDashboard({ url: "https://example.test/observatory/?page=99", fetchSnapshot: async () => new Response(JSON.stringify(many)) });
+  await paged.ready();
+  assert.match(paged.window.location.search, /page=3/);
+  assert.match(paged.elements.get("result-count").textContent, /52 matching.*51–52/);
+  paged.elements.get("previous-page").click(); assert.match(paged.window.location.search, /page=2/);
+  await paged.go(-1); assert.match(paged.elements.get("page-label").textContent, /Page 3 of 3/);
+  paged.elements.get("clear-filters").click();
+  paged.elements.get("search-input").value = "domain";
+  paged.elements.get("search-input").listeners.input();
+  paged.elements.get("next-page").click(); paged.flush();
+  assert.match(paged.elements.get("page-label").textContent, /Page 1 of 3/);
+  assert.match(paged.window.location.search, /q=domain/);
+  const initial = startDashboard({ fetchIndex: async () => { throw new Error("Index offline"); } });
+  await initial.ready(); assert.match(initial.elements.get("error-message").textContent, /Index offline/);
+  initial.setIndexFetch(async () => ({ ok: true, json: async () => index }));
+  await initial.elements.get("retry-data").listeners.click(); await assertLoaded(initial, "current", currentSnapshot);
+  initial.setIndexFetch(async () => { throw new Error("Refresh failed"); });
+  await initial.elements.get("refresh-data").listeners.click(); await assertLoaded(initial, "current", currentSnapshot);
+  assert.match(initial.elements.get("error-message").textContent, /Refresh failed/);
+  const noSnapshots = startDashboard({ fetchIndex: async () => ({ ok: true, json: async () => ({ ...index, snapshots: [] }) }) });
+  await noSnapshots.ready();
+  assert.match(noSnapshots.elements.get("error-message").textContent, /No snapshots/);
+  noSnapshots.setIndexFetch(async () => ({ ok: true, json: async () => index }));
+  await noSnapshots.elements.get("retry-data").listeners.click();
+  await assertLoaded(noSnapshots, "current", currentSnapshot);
+
+  const emptySnapshot = startDashboard({ fetchSnapshot: async () => new Response(JSON.stringify({ ...currentSnapshot, domains: [], summary: {} })) });
+  await emptySnapshot.ready();
+  assert.match(allText(emptySnapshot.elements.get("domain-rows")), /This snapshot contains no domains/);
+  assert.equal(emptySnapshot.elements.get("error-state").hidden, true);
+  const decode = deferred();
+  initial.setIndexFetch(async () => ({ ok: true, json: () => decode.promise }));
+  const refreshing = initial.elements.get("refresh-data").listeners.click();
+  await Promise.resolve(); await Promise.resolve();
+  await initial.select("old");
+  const accepted = visibleState(initial);
+  decode.resolve({ ...index, latest: entries[0].path }); await refreshing;
+  assert.equal(visibleState(initial), accepted, "stale index decoding changed the selected snapshot");
+  console.log("URL navigation, latest/pinned snapshots, missing links, unavailable filters, clamping, refresh and retry passed.");
+}
+
 async function run() {
+  viewHelpers = await import("../src/scripts/view-state.mjs");
+  ({ browser } = await import("./browser.mjs"));
+  await navigation();
   await main();
   await snapshotRaces();
   await staleDecoding();

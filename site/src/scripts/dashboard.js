@@ -1,3 +1,5 @@
+import { controls, parseView, viewURL, searchDebounce } from "./view-state.mjs";
+
 (() => {
   "use strict";
 
@@ -5,12 +7,42 @@
   const DATA_INDEX_URL = new URL("index.json", DATA_BASE_URL);
   const PAGE_SIZE = 25;
   const COLUMN_COUNT = 6;
-  const state = { index: null, snapshot: null, domains: [], filtered: [], page: 1 };
+  const state = { index: null, snapshot: null, domains: [], filtered: [] };
   let snapshotRequest = 0;
   let snapshotController = null;
   let snapshotLoading = false;
   let loadedEntry = null;
   let rawArchiveUrl = null;
+  let view = parseView(new URL(window.location.href).searchParams);
+  let loadedMode = "";
+  let availableIndex = null;
+  let failedRequest = null;
+
+  function writeURL(replace = false) {
+    const url = viewURL(window.location.href, view);
+    if (url !== window.location.pathname + window.location.search + window.location.hash) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", url);
+    }
+  }
+  function syncControls() {
+    populateProviderFilter();
+    for (const [key, id] of Object.entries(controls)) byId(id).value = view[key];
+    byId("snapshot-select").value = view.snapshot;
+  }
+  function changeView(patch, replace = false) {
+    search.cancel();
+    const draft = byId("search-input").value;
+    const page = draft !== view.q ? 1 : (patch.page ?? view.page);
+    view = { ...view, q: draft, ...patch, page };
+    syncControls();
+    writeURL(replace);
+    getFilteredDomains();
+  }
+  const search = searchDebounce(q => changeView({ q, page: 1 }, true));
+  function clearFilters() {
+    changeView({ ...parseView(new URLSearchParams()), snapshot: view.snapshot });
+    byId("search-input").focus();
+  }
 
   const byId = (id) => document.getElementById(id);
   const el = (tag, className, text) => {
@@ -302,18 +334,24 @@
   function fillSnapshotSelector() {
     const select = byId("snapshot-select");
     select.replaceChildren();
-    const snapshots = safeArray(state.index && state.index.snapshots);
+    const snapshots = safeArray(availableIndex && availableIndex.snapshots);
     if (!snapshots.length) {
       select.append(el("option", "", "No scans yet"));
       select.disabled = true;
       return;
     }
-    for (const item of snapshots.slice().sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at))) {
+    const latest = el("option", "", "Latest available");
+    latest.value = "";
+    select.append(latest);
+    const choices = snapshots.slice();
+    if (loadedEntry && !choices.some(item => String(item.id) === String(loadedEntry.id))) choices.push(loadedEntry);
+    for (const item of choices.sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at))) {
       const option = el("option", "", `${dateLabel(item.generated_at, true)} · ${count(item.domain_count)} domains`);
       option.value = String(item.id);
       select.append(option);
     }
     select.disabled = false;
+    select.value = view.snapshot;
   }
 
   function providerNames(domain) {
@@ -340,7 +378,13 @@
       option.value = name;
       select.append(option);
     }
-    select.disabled = names.size === 0;
+    if (view.provider !== "all" && !names.has(view.provider)) {
+      const option = el("option", "", view.provider + " (unavailable)");
+      option.value = view.provider;
+      select.append(option);
+    }
+    select.value = view.provider;
+    select.disabled = false;
   }
 
   function searchableText(domain) {
@@ -365,17 +409,10 @@
   }
 
   function getFilteredDomains() {
-    const query = byId("search-input").value.trim().toLowerCase();
-    const rankStatus = byId("rank-filter").value;
-    const spfStatus = byId("spf-filter").value;
-    const qualifier = byId("spf-qualifier-filter").value;
-    const dmarcPolicy = byId("dmarc-filter").value;
-    const provider = byId("provider-filter").value;
-    const dnssec = byId("dnssec-filter").value;
-    const availability = byId("securitytxt-filter").value;
-    const contentValidity = byId("content-validity-filter").value;
-    const freshness = byId("securitytxt-freshness-filter").value;
-    const certificate = byId("tls-filter").value;
+    if (!state.snapshot) return;
+    const query = view.q.trim().toLowerCase();
+    const { rank: rankStatus, spf: spfStatus, spfEnding: qualifier, dmarc: dmarcPolicy, provider,
+      dnssec, securityTxt: availability, format: contentValidity, freshness, tls: certificate } = view;
     state.filtered = state.domains.filter((domain) => {
       if (query && !searchableText(domain).includes(query)) return false;
       if (rankStatus !== "all" && domain.rank_status !== rankStatus) return false;
@@ -400,7 +437,8 @@
       if (certificate !== "all" && security.tls_certificate !== certificate) return false;
       return true;
     });
-    state.page = Math.min(state.page, Math.max(1, Math.ceil(state.filtered.length / PAGE_SIZE)));
+    const page = Math.min(view.page, Math.max(1, Math.ceil(state.filtered.length / PAGE_SIZE)));
+    if (!snapshotLoading && page !== view.page) { view.page = page; writeURL(true); }
     renderTable();
   }
 
@@ -627,7 +665,8 @@
     target.replaceChildren();
     const total = state.filtered.length;
     const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    const start = (state.page - 1) * PAGE_SIZE;
+    const displayedPage = Math.min(view.page, pageCount);
+    const start = (displayedPage - 1) * PAGE_SIZE;
     for (const domain of state.filtered.slice(start, start + PAGE_SIZE)) {
       const row = el("tr", "data-row");
       const rank = labelled("Rank"); rank.append(domainRank(domain));
@@ -655,15 +694,19 @@
     }
     if (!total) {
       const row = el("tr");
-      const cell = el("td", "empty-cell", "No domains match these filters.");
+      const cell = el("td", "empty-cell", state.domains.length ? "No domains match these filters." : "This snapshot contains no domains.");
       cell.colSpan = COLUMN_COUNT;
+      const clear = el("button", "button", "Clear filters");
+      clear.type = "button";
+      clear.addEventListener("click", clearFilters);
+      cell.append(el("br"), clear);
       row.append(cell);
       target.append(row);
     }
-    byId("result-count").textContent = `${count(total)} matching domains · showing ${count(total ? start + 1 : 0)}–${count(Math.min(start + PAGE_SIZE, total))}`;
-    byId("page-label").textContent = `Page ${count(state.page)} of ${count(pageCount)}`;
-    byId("previous-page").disabled = state.page <= 1;
-    byId("next-page").disabled = state.page >= pageCount;
+    byId("result-count").textContent = `${snapshotLoading ? "Previous snapshot · " : ""}${count(total)} matching domains · showing ${count(total ? start + 1 : 0)}–${count(Math.min(start + PAGE_SIZE, total))}`;
+    byId("page-label").textContent = `Page ${count(displayedPage)} of ${count(pageCount)}`;
+    byId("previous-page").disabled = snapshotLoading || view.page <= 1;
+    byId("next-page").disabled = snapshotLoading || view.page >= pageCount;
   }
 
   async function decodeSnapshot(response, path) {
@@ -696,7 +739,7 @@
     byId("findings-list").textContent = "The snapshot could not be loaded.";
     byId("empty-state").hidden = true;
     byId("error-state").hidden = false;
-    byId("error-state").textContent = `Unable to load the public snapshot: ${error.message}`;
+    byId("error-message").textContent = `Unable to load the public snapshot: ${error.message}`;
     byId("result-count").textContent = "Data feed unavailable";
     const row = el("tr");
     const cell = el("td", "empty-cell", "The snapshot could not be loaded.");
@@ -706,52 +749,99 @@
     updateDownloads();
   }
 
-  async function loadSnapshot(entry) {
+  async function loadSnapshot(mode = view.snapshot, reloadIndex = false, revalidate = false) {
     const request = ++snapshotRequest;
     snapshotController?.abort();
     const controller = new AbortController();
     snapshotController = controller;
     snapshotLoading = true;
+    byId("refresh-data").disabled = byId("retry-data").disabled = true;
+    byId("previous-page").disabled = byId("next-page").disabled = true;
     byId("error-state").hidden = true;
     byId("feed-status").textContent = state.snapshot
       ? "Loading selected snapshot · showing previous snapshot"
       : "Loading snapshot…";
+    if (!state.snapshot) {
+      byId("result-count").textContent = "Loading domains…";
+      byId("findings-list").textContent = "Loading findings…";
+      const row = el("tr");
+      const cell = el("td", "empty-cell", "Loading the public snapshot…");
+      cell.colSpan = COLUMN_COUNT;
+      row.append(cell);
+      byId("domain-rows").replaceChildren(row);
+    }
+    getFilteredDomains();
     updateDownloads();
     try {
-      const url = new URL(entry.path, DATA_BASE_URL);
-      const response = await fetch(url, { cache: "force-cache", signal: controller.signal });
+      let index = availableIndex;
+      if (!index || reloadIndex) {
+        const response = await fetch(DATA_INDEX_URL, { cache: "no-cache", signal: controller.signal });
+        if (request !== snapshotRequest) return;
+        if (!response.ok) throw new Error(`Index request failed (${response.status})`);
+        index = await response.json();
+        if (request !== snapshotRequest) return;
+        if (index.schema_version !== 5) throw new Error(`Unsupported index schema ${index.schema_version}`);
+        availableIndex = index;
+        fillSnapshotSelector();
+      }
+      const snapshots = safeArray(index.snapshots).slice().sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at));
+      if (!snapshots.length) throw new Error("No snapshots are available yet");
+      let entry = mode ? snapshots.find(item => String(item.id) === mode) : null;
+      if (mode && !entry) {
+        byId("snapshot-notice").textContent = "The linked snapshot is no longer available. Loading the latest available snapshot.";
+        byId("snapshot-notice").hidden = false;
+        mode = view.snapshot = "";
+        view.page = 1;
+        writeURL(true);
+      }
+      entry ||= snapshots.find(item => item.path === index.latest) || snapshots[0];
+      byId("snapshot-select").value = mode;
+      const response = await fetch(new URL(entry.path, DATA_BASE_URL), { cache: reloadIndex || revalidate ? "no-cache" : "force-cache", signal: controller.signal });
       if (request !== snapshotRequest) return;
       const snapshot = await decodeSnapshot(response, entry.path);
-      // Aborting fetch cannot cancel decoding that has already started.
+      // An abort cannot stop decoding that already started.
       if (request !== snapshotRequest) return;
       if (snapshot.schema_version !== 5) throw new Error(`Unsupported snapshot schema ${snapshot.schema_version}`);
       const raw = snapshot.raw_archive || entry.raw_archive;
       const rawUrl = raw ? new URL(raw, DATA_BASE_URL).href : null;
+      state.index = index;
       state.snapshot = snapshot;
       state.domains = safeArray(snapshot.domains);
-      state.filtered = state.domains;
-      state.page = 1;
       loadedEntry = entry;
+      loadedMode = mode;
+      failedRequest = null;
       rawArchiveUrl = rawUrl;
-      byId("snapshot-select").value = String(entry.id);
+      snapshotLoading = false;
+      view.snapshot = mode;
+      byId("snapshot-select").value = mode;
+      if (!byId("snapshot-notice").hidden) byId("snapshot-notice").textContent = "The linked snapshot is no longer available. Showing the latest available snapshot.";
       setSnapshotMeta(snapshot);
       setMetricCards(snapshot);
       drawCharts(snapshot);
+      drawHistoryChart();
+      drawSpfHistoryChart();
       populateProviderFilter();
       getFilteredDomains();
       byId("empty-state").hidden = state.domains.length !== 0;
     } catch (error) {
       if (request !== snapshotRequest) return;
+      failedRequest = { mode, reloadIndex: reloadIndex || !safeArray(availableIndex && availableIndex.snapshots).length };
+      byId("snapshot-notice").hidden = true;
+      snapshotLoading = false;
       if (loadedEntry) {
-        byId("snapshot-select").value = String(loadedEntry.id);
+        view.snapshot = loadedMode;
+        fillSnapshotSelector();
+        writeURL(true);
+        getFilteredDomains();
         byId("feed-status").textContent = "Showing previously loaded snapshot";
         byId("error-state").hidden = false;
-        byId("error-state").textContent = `Unable to load the selected snapshot: ${error.message}. Showing the previous snapshot.`;
+        byId("error-message").textContent = `Unable to load the selected snapshot: ${error.message}. Showing the previous snapshot.`;
       } else showUnavailable(error);
     } finally {
       if (request === snapshotRequest) {
         snapshotLoading = false;
         snapshotController = null;
+        byId("refresh-data").disabled = byId("retry-data").disabled = false;
         updateDownloads();
       }
     }
@@ -815,53 +905,37 @@
     downloadFile(`au-mail-auth-${date}.json`, JSON.stringify(state.snapshot, null, 2), "application/json;charset=utf-8");
   }
 
-  async function initialize() {
-    try {
-      const response = await fetch(DATA_INDEX_URL, { cache: "no-cache" });
-      if (!response.ok) throw new Error(`Index request failed (${response.status})`);
-      state.index = await response.json();
-      if (state.index.schema_version !== 5) throw new Error(`Unsupported data index schema ${state.index.schema_version}`);
-      drawHistoryChart();
-      drawSpfHistoryChart();
-      fillSnapshotSelector();
-      const snapshots = safeArray(state.index.snapshots).slice().sort((a, b) => new Date(b.generated_at) - new Date(a.generated_at));
-      if (!snapshots.length) {
-        byId("feed-status").textContent = "No scans yet";
-        byId("metrics").replaceChildren();
-        byId("policy-chart").textContent = "No scans yet";
-        byId("history-chart").textContent = "No scans yet";
-        byId("spf-history-chart").textContent = "No scans yet";
-        byId("signals-chart").textContent = "No scans yet";
-        byId("web-chart").textContent = "No scans yet";
-        byId("provider-inbound-chart").textContent = "No scans yet";
-        byId("provider-outbound-chart").textContent = "No scans yet";
-        byId("findings-list").textContent = "No scans yet";
-        byId("empty-state").hidden = false;
-        byId("domain-rows").replaceChildren();
-        setSnapshotMeta(null);
-        renderTable();
-        return;
-      }
-      const latest = snapshots.find((item) => item.path === state.index.latest) || snapshots[0];
-      byId("snapshot-select").value = String(latest.id);
-      await loadSnapshot(latest);
-    } catch (error) {
-      showUnavailable(error);
-    }
-  }
-
-  byId("snapshot-select").addEventListener("change", async (event) => {
-    const entry = safeArray(state.index && state.index.snapshots).find((item) => String(item.id) === event.target.value);
-    if (!entry) return;
-    await loadSnapshot(entry);
+  byId("snapshot-select").addEventListener("change", () => {
+    byId("snapshot-notice").hidden = true;
+    changeView({ snapshot: byId("snapshot-select").value, page: 1 });
+    return loadSnapshot();
   });
-
-  for (const id of ["search-input", "rank-filter", "spf-filter", "spf-qualifier-filter", "dmarc-filter", "provider-filter", "dnssec-filter", "securitytxt-filter", "content-validity-filter", "securitytxt-freshness-filter", "tls-filter"]) {
-    byId(id).addEventListener(id === "search-input" ? "input" : "change", () => { state.page = 1; getFilteredDomains(); });
+  byId("search-input").addEventListener("input", () => search.schedule(byId("search-input").value));
+  for (const [key, id] of Object.entries(controls)) {
+    if (key !== "q") byId(id).addEventListener("change", () => changeView({ [key]: byId(id).value, page: 1 }));
   }
-  byId("previous-page").addEventListener("click", () => { state.page = Math.max(1, state.page - 1); renderTable(); });
-  byId("next-page").addEventListener("click", () => { state.page += 1; renderTable(); });
+  byId("clear-filters").addEventListener("click", clearFilters);
+  byId("refresh-data").addEventListener("click", () => { if (!snapshotLoading) return loadSnapshot(view.snapshot, true); });
+  byId("retry-data").addEventListener("click", () => {
+    if (snapshotLoading || !failedRequest) return;
+    const { mode, reloadIndex } = failedRequest;
+    changeView({ snapshot: mode });
+    return loadSnapshot(mode, reloadIndex, true);
+  });
+  byId("previous-page").addEventListener("click", () => changeView({ page: Math.max(1, view.page - 1) }));
+  byId("next-page").addEventListener("click", () => changeView({ page: view.page + 1 }));
   byId("download-csv").addEventListener("click", exportCSV);
   byId("download-json").addEventListener("click", exportJSON);
-  initialize();
+  window.addEventListener("popstate", () => {
+    search.cancel();
+    const previous = view.snapshot;
+    view = parseView(new URL(window.location.href).searchParams);
+    syncControls();
+    writeURL(true);
+    if (previous !== view.snapshot || !state.snapshot) return loadSnapshot();
+    getFilteredDomains();
+  });
+  syncControls();
+  writeURL(true);
+  loadSnapshot();
 })();

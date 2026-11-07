@@ -78,7 +78,9 @@ const jsonLd = {
             <select id="snapshot-select" disabled><option>Loading…</option></select>
           </div>
         </div>
-        <div id="metrics" class="metric-grid" aria-live="polite"></div>
+        <p class="section-copy">Snapshot-wide metrics, before table filters.</p>
+        <div id="metrics" class="metric-grid"></div>
+        <p id="snapshot-notice" role="status" hidden></p>
 
         <div class="chart-grid">
           <article class="chart-card">
@@ -151,6 +153,10 @@ const jsonLd = {
           <div><label for="tls-filter">Endpoint certificate</label><select id="tls-filter"><option value="all">Any state</option><option value="valid">Valid</option><option value="invalid">Invalid</option><option value="error">TLS error</option><option value="not_observed">Not observed</option></select></div>
         </div>
 
+        <div class="dashboard-actions">
+          <button id="clear-filters" class="button" type="button">Clear filters</button>
+          <button id="refresh-data" class="button" type="button">Refresh</button>
+        </div>
         <div class="table-toolbar">
           <p id="result-count" aria-live="polite">Loading domains…</p>
           <div class="pagination" aria-label="Table pages">
@@ -167,10 +173,10 @@ const jsonLd = {
           </table>
         </div>
         <div id="empty-state" class="empty-state" hidden>
-          <h3>No scan data yet</h3>
-          <p>Run the <code>Refresh .au security data and publish Pages</code> workflow from the Actions tab to create the first snapshot.</p>
+          <h3>No domains in this snapshot</h3>
+          <p>Select another snapshot or refresh to check for new data.</p>
         </div>
-        <div id="error-state" class="error-state" role="alert" hidden></div>
+        <div id="error-state" class="error-state" role="alert" hidden><p id="error-message"></p><button id="retry-data" class="button" type="button">Retry</button></div>
       </section>
 
       <section id="methodology" aria-labelledby="methodology-title">
